@@ -1,0 +1,23 @@
+# local configuration
+.env
+
+# generated / runtime content
+db/*.sql
+node_modules/
+vendor/
+wp-content/uploads/
+wp-content/cache/
+wp-content/upgrade/
+wp-content/languages/
+wp-content/*.log
+
+# project state: themes and plugins are cloned/dropped in per project
+wp-content/plugins/*
+!wp-content/plugins/.gitkeep
+wp-content/themes/*
+!wp-content/themes/.gitkeep
+
+# editor / OS noise
+.DS_Store
+.idea/
+.vscode/

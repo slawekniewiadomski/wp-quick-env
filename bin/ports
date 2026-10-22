@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Show the configured ports, or roll a fresh free block into .env with --new.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+NEW=0
+BASE=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --new) NEW=1; shift ;;
+    --base) BASE="${2:-}"; shift 2 ;;
+    --base=*) BASE="${1#*=}"; shift ;;
+    -h | --help)
+      cat <<'EOF'
+Usage: bin/ports [--new] [--base PORT]
+
+  (no flags)   show WP_PORT / PMA_PORT / VITE_PORT and whether they are free
+  --new        allocate a new random free block and write it to .env
+  --base PORT  use a specific block base with --new
+EOF
+      exit 0
+      ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+require_env
+
+if [ "$NEW" -eq 1 ]; then
+  old_wp="$(env_get WP_PORT)"
+  old_pma="$(env_get PMA_PORT)"
+  old_vite="$(env_get VITE_PORT)"
+
+  if [ -n "$BASE" ]; then
+    [[ "$BASE" =~ ^[0-9]+$ ]] || die "--base must be numeric (e.g. --base 20500)"
+    base="$BASE"
+  else
+    base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+  fi
+
+  env_set WP_PORT "$base"
+  env_set PMA_PORT "$((base + 1))"
+  env_set VITE_PORT "$((base + 10))"
+
+  ok "ports updated: $old_wp/$old_pma/$old_vite -> $base/$((base + 1))/$((base + 10))"
+  info "run 'task restart' to apply"
+  warn "URLs baked into post content still point at the old port - fix with:"
+  warn "  task wp -- search-replace 'http://localhost:${old_wp}' 'http://localhost:${base}' --all-tables"
+  exit 0
+fi
+
+if project_running; then
+  printf '\033[33m!\033[0m stack is running - busy ports are expected\n\n'
+fi
+
+printf '%-10s %-6s %s\n' "VAR" "PORT" "STATUS"
+for spec in "WP_PORT:$(env_get WP_PORT)" "PMA_PORT:$(env_get PMA_PORT)" "VITE_PORT:$(env_get VITE_PORT)"; do
+  key="${spec%%:*}"
+  port="${spec#*:}"
+  if port_busy "$port"; then
+    owner="$(port_owner "$port")"
+    printf '%-10s %-6s busy%s\n' "$key" "$port" "${owner:+ by $owner}"
+  else
+    printf '%-10s %-6s free\n' "$key" "$port"
+  fi
+done

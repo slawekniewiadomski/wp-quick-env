@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Print the resolved version matrix and image names.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+require_env
+
+project="$(env_get COMPOSE_PROJECT_NAME)"
+wp_version="$(env_get WP_VERSION)"
+php_version="$(env_get PHP_VERSION)"
+
+printf '%-20s %s\n' "project" "$project"
+printf '%-20s %s\n' "wordpress image" "wordpress:${wp_version}-php${php_version}-apache"
+printf '%-20s %s\n' "php (runtime)" "$php_version"
+printf '%-20s %s\n' "wp-cli" "$(env_get WP_CLI_VERSION)"
+printf '%-20s %s\n' "composer" "$(env_get COMPOSER_VERSION) (runs on php ${php_version})"
+printf '%-20s %s\n' "node" "$(env_get NODE_VERSION)"
+printf '%-20s %s\n' "mariadb" "$(env_get MARIADB_VERSION)"
+printf '%-20s %s\n' "phpmyadmin" "$(env_get PHPMYADMIN_VERSION)"
+printf '%-20s %s\n' "built image" "${project}/php:wp${wp_version}-php${php_version}"
+printf '\n'
+printf '%-20s %s\n' "WP_PORT" "$(env_get WP_PORT)"
+printf '%-20s %s\n' "PMA_PORT" "$(env_get PMA_PORT)"
+printf '%-20s %s\n' "VITE_PORT" "$(env_get VITE_PORT)"
+printf '%-20s %s\n' "THEME_DIR" "$(env_get THEME_DIR || true)"

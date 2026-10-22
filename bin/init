@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Create .env for this checkout: host UID/GID, compose project name, and a
+# random free port block (WordPress / phpMyAdmin / Vite).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: bin/init [options]
+
+Writes .env from .env.example with:
+  - HOST_UID / HOST_GID of the current user
+  - COMPOSE_PROJECT_NAME derived from the checkout directory name
+  - a random free port block in 20000-29999 (WP, +1 phpMyAdmin, +10 Vite)
+
+Options:
+  --name NAME       Compose project name (default: directory name)
+  --base PORT       Use a specific port block base, e.g. 20500
+  --wp-port PORT    Explicit WordPress port (overrides the random base)
+  --pma-port PORT   Explicit phpMyAdmin port
+  --vite-port PORT  Explicit Vite port
+  --no-random       Keep the fixed defaults from .env.example
+  --force           Overwrite an existing .env
+  -h, --help        Show this help
+EOF
+}
+
+NAME=""
+BASE=""
+WP_PORT=""
+PMA_PORT=""
+VITE_PORT=""
+NO_RANDOM=0
+FORCE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) NAME="${2:-}"; shift 2 ;;
+    --name=*) NAME="${1#*=}"; shift ;;
+    --base) BASE="${2:-}"; shift 2 ;;
+    --base=*) BASE="${1#*=}"; shift ;;
+    --wp-port) WP_PORT="${2:-}"; shift 2 ;;
+    --wp-port=*) WP_PORT="${1#*=}"; shift ;;
+    --pma-port) PMA_PORT="${2:-}"; shift 2 ;;
+    --pma-port=*) PMA_PORT="${1#*=}"; shift ;;
+    --vite-port) VITE_PORT="${2:-}"; shift 2 ;;
+    --vite-port=*) VITE_PORT="${1#*=}"; shift ;;
+    --no-random) NO_RANDOM=1; shift ;;
+    --force) FORCE=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+  esac
+done
+
+if [ -f "$ENV_FILE" ] && [ "$FORCE" -ne 1 ]; then
+  die ".env already exists ($ENV_FILE) - use --force to overwrite"
+fi
+
+[ -f "$ENV_EXAMPLE" ] || die "missing $ENV_EXAMPLE"
+cp "$ENV_EXAMPLE" "$ENV_FILE"
+
+project_name="$(sanitize_name "${NAME:-$(basename "$ROOT")}")"
+[ -n "$project_name" ] || project_name="wp-quick-env"
+env_set COMPOSE_PROJECT_NAME "$project_name"
+env_set HOST_UID "$(id -u)"
+env_set HOST_GID "$(id -g)"
+
+if [ "$NO_RANDOM" -eq 1 ]; then
+  base=""
+  wp_port="${WP_PORT:-$(env_get WP_PORT)}"
+  pma_port="${PMA_PORT:-$(env_get PMA_PORT)}"
+  vite_port="${VITE_PORT:-$(env_get VITE_PORT)}"
+else
+  if [ -n "$BASE" ]; then
+    [[ "$BASE" =~ ^[0-9]+$ ]] || die "--base must be numeric (e.g. --base 20500)"
+    base="$BASE"
+  else
+    base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+  fi
+  wp_port="${WP_PORT:-$base}"
+  pma_port="${PMA_PORT:-$((base + 1))}"
+  vite_port="${VITE_PORT:-$((base + 10))}"
+fi
+
+for key in "$wp_port" "$pma_port" "$vite_port"; do
+  [[ "$key" =~ ^[0-9]+$ ]] || die "invalid port: $key"
+  [ "$key" -ge 1024 ] && [ "$key" -le 65535 ] || die "port out of range: $key"
+done
+
+if [ "$wp_port" = "$pma_port" ] || [ "$wp_port" = "$vite_port" ] || [ "$pma_port" = "$vite_port" ]; then
+  die "WP_PORT, PMA_PORT and VITE_PORT must all differ"
+fi
+
+for spec in "WP_PORT:$wp_port" "PMA_PORT:$pma_port" "VITE_PORT:$vite_port"; do
+  key="${spec%%:*}"
+  port="${spec#*:}"
+  if port_busy "$port"; then
+    owner="$(port_owner "$port")"
+    die "$key $port is already in use${owner:+ (by $owner)} - pick a free block with --base or override the port"
+  fi
+done
+
+env_set WP_PORT "$wp_port"
+env_set PMA_PORT "$pma_port"
+env_set VITE_PORT "$vite_port"
+
+ok ".env written to $ENV_FILE"
+printf '\n'
+printf '  project      %s\n' "$project_name"
+printf '  wordpress    http://localhost:%s\n' "$wp_port"
+printf '  phpmyadmin   http://localhost:%s\n' "$pma_port"
+printf '  vite         http://localhost:%s\n' "$vite_port"
+printf '\n'
+info "next: task start   (or: docker compose up -d --build)"

@@ -1,0 +1,210 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  THEME: '{{.THEME_DIR | default ""}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list-all
+
+  init:
+    desc: Create .env with the host UID/GID and a random free port block
+    cmds:
+      - ./bin/init
+
+  check:
+    desc: Validate image tags and port availability
+    cmds:
+      - ./bin/check
+
+  versions:
+    desc: Print the resolved version matrix
+    silent: true
+    cmds:
+      - ./bin/versions
+
+  build:
+    desc: Build the WordPress/PHP image (PHP + wp-cli + composer)
+    cmds:
+      - docker compose build
+
+  start:
+    desc: Start the stack (builds on first run)
+    deps: [check]
+    cmds:
+      - docker compose up -d --build
+      - docker compose ps
+
+  stop:
+    desc: Stop the stack
+    cmds:
+      - docker compose down --remove-orphans
+
+  restart:
+    desc: Recreate containers so .env changes (ports, versions) apply
+    cmds:
+      - docker compose up -d --build --force-recreate
+      - docker compose ps
+
+  ps:
+    desc: Show stack status
+    cmds:
+      - docker compose ps
+
+  logs:
+    desc: Follow container logs
+    cmds:
+      - docker compose logs -f --tail=100
+
+  shell:
+    desc: Shell into the WordPress container
+    cmds:
+      - docker compose exec wordpress bash
+
+  wp:
+    desc: Run wp-cli - "task wp -- core version"
+    cmds:
+      - ./bin/wp {{.CLI_ARGS}}
+
+  install:
+    desc: Install WordPress core from .env credentials (idempotent)
+    cmds:
+      - |
+        if ./bin/wp core is-installed >/dev/null 2>&1; then
+          echo "WordPress is already installed."
+        else
+          ./bin/wp core install \
+            --url="http://localhost:${WP_PORT}" \
+            --title="${WP_TITLE}" \
+            --admin_user="${WP_ADMIN_USER}" \
+            --admin_password="${WP_ADMIN_PASSWORD}" \
+            --admin_email="${WP_ADMIN_EMAIL}" \
+            --skip-email
+        fi
+
+  seed:
+    desc: Restore bundled WP themes from the image if wp-content/themes was emptied
+    cmds:
+      - |
+        docker compose exec -T wordpress sh -c '
+          if find wp-content/themes -mindepth 1 -maxdepth 1 -type d | grep -q .; then
+            echo "wp-content/themes is not empty - nothing to seed."
+          else
+            cp -a /usr/src/wordpress/wp-content/themes/. wp-content/themes/
+            echo "Seeded bundled themes from the image."
+          fi'
+
+  ports:
+    desc: Show the configured ports and whether they are free
+    cmds:
+      - ./bin/ports
+
+  ports:new:
+    desc: Allocate a new random free port block and write it to .env
+    cmds:
+      - ./bin/ports --new
+      - echo "Run 'task restart' to apply."
+
+  db:export:
+    desc: Export the database to db/dump-<timestamp>.sql
+    cmds:
+      - |
+        mkdir -p db
+        out="db/dump-$(date +%Y%m%d-%H%M%S).sql"
+        ./bin/wp db export /tmp/wp-dump.sql --quiet
+        docker compose cp wordpress:/tmp/wp-dump.sql "$out"
+        echo "-> $out"
+
+  db:import:
+    desc: Import a dump - "task db:import FILE=db/dump-....sql"
+    cmds:
+      - |
+        file="{{.FILE | default ""}}"
+        if [ -z "$file" ]; then
+          echo "usage: task db:import FILE=db/dump-....sql" >&2
+          exit 1
+        fi
+        docker compose cp "$file" wordpress:/tmp/wp-import.sql
+        ./bin/wp db import /tmp/wp-import.sql
+
+  db:shell:
+    desc: Open a MariaDB shell
+    cmds:
+      - docker compose exec db sh -c 'mariadb -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE"'
+
+  theme:clone:
+    desc: Clone a theme and set THEME_DIR - "task theme:clone -- <git-url> [name]"
+    cmds:
+      - ./bin/theme-clone {{.CLI_ARGS}}
+
+  node:install:
+    desc: npm install in THEME_DIR
+    preconditions:
+      - sh: test -n "{{.THEME}}"
+        msg: "THEME_DIR is empty - run 'task theme:clone -- <git-url>' or set it in .env"
+    cmds:
+      - docker compose exec -T node sh -c 'cd "{{.THEME}}" && npm install'
+
+  node:dev:
+    desc: Run the theme dev server (Vite) in THEME_DIR
+    preconditions:
+      - sh: test -n "{{.THEME}}"
+        msg: "THEME_DIR is empty - run 'task theme:clone -- <git-url>' or set it in .env"
+    cmds:
+      - docker compose exec node sh -c 'cd "{{.THEME}}" && npm run dev'
+
+  node:build:
+    desc: Build theme assets in THEME_DIR
+    preconditions:
+      - sh: test -n "{{.THEME}}"
+        msg: "THEME_DIR is empty - run 'task theme:clone -- <git-url>' or set it in .env"
+    cmds:
+      - docker compose exec -T node sh -c 'cd "{{.THEME}}" && npm run build'
+
+  node:shell:
+    desc: Shell into the node container
+    cmds:
+      - docker compose exec node sh
+
+  composer:install:
+    desc: composer install in THEME_DIR
+    preconditions:
+      - sh: test -n "{{.THEME}}"
+        msg: "THEME_DIR is empty - run 'task theme:clone -- <git-url>' or set it in .env"
+    cmds:
+      - docker compose run --rm composer --working-dir=/app/{{.THEME}} install
+
+  composer:update:
+    desc: composer update in THEME_DIR
+    preconditions:
+      - sh: test -n "{{.THEME}}"
+        msg: "THEME_DIR is empty - run 'task theme:clone -- <git-url>' or set it in .env"
+    cmds:
+      - docker compose run --rm composer --working-dir=/app/{{.THEME}} update
+
+  composer:shell:
+    desc: Shell inside the composer container
+    cmds:
+      - docker compose run --rm --entrypoint bash composer
+
+  clear-cache:
+    desc: Remove generated caches inside the WordPress container
+    cmds:
+      - docker compose exec -T wordpress sh -c 'rm -rf wp-content/cache/*'
+      - ./bin/wp cache flush
+
+  fix-perms:
+    desc: chown the mounted directories back to your user (rarely needed)
+    cmds:
+      - sudo chown -R $(id -u):$(id -g) wp-content db
+
+  reset:
+    desc: Destroy containers and the database volume
+    prompt: This deletes the database volume (wp-content is untouched). Continue?
+    cmds:
+      - docker compose down -v --remove-orphans

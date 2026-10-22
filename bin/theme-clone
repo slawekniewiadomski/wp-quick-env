@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Clone a theme into wp-content/themes/<name> and point THEME_DIR at it.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+URL="${1:-}"
+NAME="${2:-}"
+
+if [ -z "$URL" ]; then
+  die "usage: bin/theme-clone <git-url> [name]   (or: task theme:clone -- <git-url> [name])"
+fi
+
+require_env
+
+[ -d "$ROOT/wp-content/themes" ] || die "wp-content/themes is missing from the checkout"
+
+NAME="${NAME:-$(basename "$URL" .git)}"
+DEST="wp-content/themes/$NAME"
+
+[ -e "$ROOT/$DEST" ] && die "$DEST already exists - remove it first or pass another name"
+
+git clone "$URL" "$ROOT/$DEST"
+env_set THEME_DIR "$DEST"
+
+ok "theme cloned into $DEST"
+info "THEME_DIR=$DEST written to .env"
+info "next: task node:install && task node:dev"

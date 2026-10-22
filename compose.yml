@@ -1,0 +1,110 @@
+name: ${COMPOSE_PROJECT_NAME:-wp-quick-env}
+
+# One PHP image for the whole toolchain: WordPress serves it, and Composer runs
+# on it (`entrypoint: [composer]`). That guarantees Composer resolves packages
+# against the exact PHP version and extension set WordPress runs.
+x-php-image: &php-image
+  build:
+    context: ./docker/wordpress
+    args:
+      WP_VERSION: ${WP_VERSION:-7.1}
+      PHP_VERSION: ${PHP_VERSION:-8.4}
+      WP_CLI_VERSION: ${WP_CLI_VERSION:-2.12.0}
+      COMPOSER_VERSION: ${COMPOSER_VERSION:-2}
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
+  image: ${COMPOSE_PROJECT_NAME:-wp-quick-env}/php:wp${WP_VERSION:-7.1}-php${PHP_VERSION:-8.4}
+
+services:
+  wordpress:
+    <<: *php-image
+    ports:
+      - "${WP_PORT:-8080}:80"
+    volumes:
+      - ./wp-content:/var/www/html/wp-content
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-wordpress}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX:-wp_}
+      WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-1}
+      # Derived from WP_PORT so the site URL can never drift from the mapping.
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', 'http://localhost:${WP_PORT:-8080}');
+        define('WP_SITEURL', 'http://localhost:${WP_PORT:-8080}');
+        define('WP_ENVIRONMENT_TYPE', 'local');
+        define('FS_METHOD', 'direct');
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+      WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mariadb:${MARIADB_VERSION:-11.4}
+    volumes:
+      - db_data:/var/lib/mysql
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MARIADB_DATABASE: ${WORDPRESS_DB_NAME:-wordpress}
+      MARIADB_USER: ${WORDPRESS_DB_USER:-wordpress}
+      MARIADB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  phpmyadmin:
+    image: phpmyadmin:${PHPMYADMIN_VERSION:-5.2}
+    ports:
+      - "${PMA_PORT:-8081}:80"
+    environment:
+      PMA_HOST: db
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      UPLOAD_LIMIT: 512M
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  composer:
+    <<: *php-image
+    # Not started by `docker compose up`; used via `docker compose run`
+    # (Task: composer:install / composer:update / composer:shell).
+    profiles: ["tools"]
+    entrypoint: ["composer"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      HOME: /tmp
+      COMPOSER_CACHE_DIR: /tmp/.composer
+
+  node:
+    image: node:${NODE_VERSION:-24}
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      # non-root user has no writable home in the image
+      HOME: /tmp
+      NPM_CONFIG_CACHE: /tmp/.npm
+      # themes should read these instead of hardcoding a URL/port
+      APP_URL: http://localhost:${WP_PORT:-8080}
+      VITE_PORT: ${VITE_PORT:-5173}
+    ports:
+      - "${VITE_PORT:-5173}:${VITE_PORT:-5173}"
+    extra_hosts:
+      - "localhost:host-gateway"
+    command: tail -f /dev/null
+
+volumes:
+  db_data:

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Validate the version matrix (image tags exist) and port availability before
+# starting the stack, so failures are one readable line instead of a raw pull
+# or bind error.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+require_env
+
+WP_VERSION="$(env_get WP_VERSION)"
+PHP_VERSION="$(env_get PHP_VERSION)"
+NODE_VERSION="$(env_get NODE_VERSION)"
+COMPOSER_VERSION="$(env_get COMPOSER_VERSION)"
+MARIADB_VERSION="$(env_get MARIADB_VERSION)"
+PHPMYADMIN_VERSION="$(env_get PHPMYADMIN_VERSION)"
+WP_PORT="$(env_get WP_PORT)"
+PMA_PORT="$(env_get PMA_PORT)"
+VITE_PORT="$(env_get VITE_PORT)"
+
+failures=0
+
+image_available() {
+  local image="$1"
+  # Local image wins (works offline); otherwise ask the registry.
+  docker image inspect "$image" >/dev/null 2>&1 ||
+    docker manifest inspect "$image" >/dev/null 2>&1
+}
+
+check_image() {
+  local label="$1" image="$2" hint="$3"
+  if image_available "$image"; then
+    printf '\033[32m✓\033[0m %-12s %s\n' "$label" "$image"
+  else
+    printf '\033[31m✗\033[0m %-12s %s not found\n' "$label" "$image"
+    [ -n "$hint" ] && printf '    %s\n' "$hint"
+    failures=$((failures + 1))
+  fi
+}
+
+info "version matrix (.env)"
+check_image "wordpress" "wordpress:${WP_VERSION}-php${PHP_VERSION}-apache" \
+  "No such tag - pick a valid combination from https://hub.docker.com/_/wordpress/tags"
+check_image "mariadb" "mariadb:${MARIADB_VERSION}" ""
+check_image "phpmyadmin" "phpmyadmin:${PHPMYADMIN_VERSION}" ""
+check_image "node" "node:${NODE_VERSION}" "See https://hub.docker.com/_/node/tags"
+check_image "composer" "composer:${COMPOSER_VERSION}" "See https://hub.docker.com/_/composer/tags"
+
+printf '\n'
+info "ports (.env)"
+
+if project_running; then
+  printf '\033[33m!\033[0m stack is running - port checks skipped\n'
+else
+  for spec in "WP_PORT:$WP_PORT" "PMA_PORT:$PMA_PORT" "VITE_PORT:$VITE_PORT"; do
+    key="${spec%%:*}"
+    port="${spec#*:}"
+    if port_busy "$port"; then
+      owner="$(port_owner "$port")"
+      printf '\033[31m✗\033[0m %-10s %-6s in use%s\n' "$key" "$port" "${owner:+ by $owner}"
+      printf '    %s\n' "Run 'task ports:new' or edit $key in .env"
+      failures=$((failures + 1))
+    else
+      printf '\033[32m✓\033[0m %-10s %-6s free\n' "$key" "$port"
+    fi
+  done
+fi
+
+if [ "$failures" -gt 0 ]; then
+  printf '\n'
+  die "$failures check(s) failed"
+fi
+
+printf '\n'
+ok "all checks passed"
