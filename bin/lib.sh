@@ -173,6 +173,38 @@ OFFICIAL_PHP_BRANCHES="8.3 8.4 8.5"
 SURY_PHP_BRANCHES="5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2"
 PHP_BRANCHES="$SURY_PHP_BRANCHES $OFFICIAL_PHP_BRANCHES"
 
+# valid_php_branch VERSION -> 0 if valid patched PHP branch
+valid_php_branch() {
+  case " $PHP_BRANCHES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# valid_text VALUE -> 0 if non-empty
+valid_text() { [ -n "$1" ]; }
+
+# valid_wp_version VERSION -> 0 for X.Y or X.Y.Z
+valid_wp_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
+
+# valid_identifier VALUE -> 0 for [A-Za-z0-9_]+
+valid_identifier() { [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]; }
+
+# valid_email VALUE -> 0 for a basic email shape
+valid_email() { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
+
+# valid_port PORT -> 0 if valid port number (1024-65535)
+valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+# valid_image_version VERSION -> 0 if valid image version format
+valid_image_version() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]]; }
+
+# valid_db_version VERSION -> 0 if valid DB version format
+valid_db_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
+
 # php_source_for VERSION -> official|sury, fails for an unknown branch
 php_source_for() {
   case "$1" in
