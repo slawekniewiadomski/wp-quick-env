@@ -3,9 +3,13 @@ name: ${COMPOSE_PROJECT_NAME:-wp-quick-env}
 # One PHP image for the whole toolchain: WordPress serves it, and Composer runs
 # on it (`entrypoint: [composer]`). That guarantees Composer resolves packages
 # against the exact PHP version and extension set WordPress runs.
+# PHP_SOURCE picks the runtime: `official` (8.3+, patched upstream) or `sury`
+# (below 8.3, patched through packages.sury.org). bin/init derives it from
+# PHP_VERSION; bin/check rejects a mismatch.
 x-php-image: &php-image
   build:
     context: ./docker/wordpress
+    dockerfile: Dockerfile.${PHP_SOURCE:-official}
     args:
       WP_VERSION: ${WP_VERSION:-7.1}
       PHP_VERSION: ${PHP_VERSION:-8.4}
@@ -13,7 +17,7 @@ x-php-image: &php-image
       COMPOSER_VERSION: ${COMPOSER_VERSION:-2}
       HOST_UID: ${HOST_UID:-1000}
       HOST_GID: ${HOST_GID:-1000}
-  image: ${COMPOSE_PROJECT_NAME:-wp-quick-env}/php:wp${WP_VERSION:-7.1}-php${PHP_VERSION:-8.4}
+  image: ${COMPOSE_PROJECT_NAME:-wp-quick-env}/php:wp${WP_VERSION:-7.1}-php${PHP_VERSION:-8.4}-${PHP_SOURCE:-official}
 
 services:
   wordpress:
