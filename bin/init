@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Create .env for this checkout: host UID/GID, compose project name, and a
-# random free port block (WordPress / phpMyAdmin / Vite).
+# Create .env for this checkout: host UID/GID, project name, versions, ports
+# and credentials. Asks for the values when run in a terminal.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,20 +11,41 @@ usage() {
   cat <<'EOF'
 Usage: bin/init [options]
 
-Writes .env from .env.example with:
+Interactively writes .env from .env.example (press Enter to accept a default).
+Without a terminal, or with --yes, every value falls back to its default.
+Always fills in:
   - HOST_UID / HOST_GID of the current user
-  - COMPOSE_PROJECT_NAME derived from the checkout directory name
+  - PHP_SOURCE derived from PHP_VERSION (official image for 8.3+, sury below)
   - a random free port block in 20000-29999 (WP, +1 phpMyAdmin, +10 Vite)
 
 Options:
-  --name NAME       Compose project name (default: directory name)
-  --base PORT       Use a specific port block base, e.g. 20500
-  --wp-port PORT    Explicit WordPress port (overrides the random base)
-  --pma-port PORT   Explicit phpMyAdmin port
-  --vite-port PORT  Explicit Vite port
-  --no-random       Keep the fixed defaults from .env.example
-  --force           Overwrite an existing .env
-  -h, --help        Show this help
+  --name NAME              Compose project name (default: directory name)
+  --wp VERSION             WordPress version, e.g. 7.1
+  --php VERSION            PHP branch: 5.6 7.0 7.1 7.2 7.3 7.4 8.0 8.1 8.2
+                           8.3 8.4 8.5  (8.3+ official, older sury backports)
+  --node VERSION           Node image version, e.g. 24
+  --mariadb VERSION        MariaDB image version, e.g. 11.4
+  --phpmyadmin VERSION     phpMyAdmin image version, e.g. 5.2
+  --wp-cli VERSION         wp-cli phar version, e.g. 2.12.0
+  --composer VERSION       Composer image version, e.g. 2 or 2.2 for PHP <7.2
+  --title TITLE            Site title
+  --admin-user USER        WordPress admin username
+  --admin-password PASS    WordPress admin password
+  --admin-email EMAIL      WordPress admin email
+  --db-root-password PASS  MariaDB root password
+  --db-name NAME           Database name
+  --db-user USER           Database user
+  --db-password PASS       Database password
+  --db-prefix PREFIX       Table prefix (default: wp_)
+  --theme DIR              Theme path for the node/composer tasks
+  --base PORT              Use a specific port block base, e.g. 20500
+  --wp-port PORT           Explicit WordPress port (overrides the random base)
+  --pma-port PORT          Explicit phpMyAdmin port
+  --vite-port PORT         Explicit Vite port
+  --no-random              Keep the fixed port defaults from .env.example
+  --force                  Overwrite an existing .env without asking
+  -y, --yes                Accept all defaults, never prompt
+  -h, --help               Show this help
 EOF
 }
 
@@ -35,11 +56,63 @@ PMA_PORT=""
 VITE_PORT=""
 NO_RANDOM=0
 FORCE=0
+ASSUME_YES=0
+OPT_WP=""
+OPT_PHP=""
+OPT_NODE=""
+OPT_MARIADB=""
+OPT_PHPMYADMIN=""
+OPT_WP_CLI=""
+OPT_COMPOSER=""
+OPT_TITLE=""
+OPT_ADMIN_USER=""
+OPT_ADMIN_PASSWORD=""
+OPT_ADMIN_EMAIL=""
+OPT_DB_ROOT=""
+OPT_DB_NAME=""
+OPT_DB_USER=""
+OPT_DB_PASSWORD=""
+OPT_DB_PREFIX=""
+OPT_THEME=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="${2:-}"; shift 2 ;;
     --name=*) NAME="${1#*=}"; shift ;;
+    --wp) OPT_WP="${2:-}"; shift 2 ;;
+    --wp=*) OPT_WP="${1#*=}"; shift ;;
+    --php) OPT_PHP="${2:-}"; shift 2 ;;
+    --php=*) OPT_PHP="${1#*=}"; shift ;;
+    --node) OPT_NODE="${2:-}"; shift 2 ;;
+    --node=*) OPT_NODE="${1#*=}"; shift ;;
+    --mariadb) OPT_MARIADB="${2:-}"; shift 2 ;;
+    --mariadb=*) OPT_MARIADB="${1#*=}"; shift ;;
+    --phpmyadmin) OPT_PHPMYADMIN="${2:-}"; shift 2 ;;
+    --phpmyadmin=*) OPT_PHPMYADMIN="${1#*=}"; shift ;;
+    --wp-cli) OPT_WP_CLI="${2:-}"; shift 2 ;;
+    --wp-cli=*) OPT_WP_CLI="${1#*=}"; shift ;;
+    --composer) OPT_COMPOSER="${2:-}"; shift 2 ;;
+    --composer=*) OPT_COMPOSER="${1#*=}"; shift ;;
+    --title) OPT_TITLE="${2:-}"; shift 2 ;;
+    --title=*) OPT_TITLE="${1#*=}"; shift ;;
+    --admin-user) OPT_ADMIN_USER="${2:-}"; shift 2 ;;
+    --admin-user=*) OPT_ADMIN_USER="${1#*=}"; shift ;;
+    --admin-password) OPT_ADMIN_PASSWORD="${2:-}"; shift 2 ;;
+    --admin-password=*) OPT_ADMIN_PASSWORD="${1#*=}"; shift ;;
+    --admin-email) OPT_ADMIN_EMAIL="${2:-}"; shift 2 ;;
+    --admin-email=*) OPT_ADMIN_EMAIL="${1#*=}"; shift ;;
+    --db-root-password) OPT_DB_ROOT="${2:-}"; shift 2 ;;
+    --db-root-password=*) OPT_DB_ROOT="${1#*=}"; shift ;;
+    --db-name) OPT_DB_NAME="${2:-}"; shift 2 ;;
+    --db-name=*) OPT_DB_NAME="${1#*=}"; shift ;;
+    --db-user) OPT_DB_USER="${2:-}"; shift 2 ;;
+    --db-user=*) OPT_DB_USER="${1#*=}"; shift ;;
+    --db-password) OPT_DB_PASSWORD="${2:-}"; shift 2 ;;
+    --db-password=*) OPT_DB_PASSWORD="${1#*=}"; shift ;;
+    --db-prefix) OPT_DB_PREFIX="${2:-}"; shift 2 ;;
+    --db-prefix=*) OPT_DB_PREFIX="${1#*=}"; shift ;;
+    --theme) OPT_THEME="${2:-}"; shift 2 ;;
+    --theme=*) OPT_THEME="${1#*=}"; shift ;;
     --base) BASE="${2:-}"; shift 2 ;;
     --base=*) BASE="${1#*=}"; shift ;;
     --wp-port) WP_PORT="${2:-}"; shift 2 ;;
@@ -50,39 +123,175 @@ while [ $# -gt 0 ]; do
     --vite-port=*) VITE_PORT="${1#*=}"; shift ;;
     --no-random) NO_RANDOM=1; shift ;;
     --force) FORCE=1; shift ;;
+    -y | --yes) ASSUME_YES=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument: $1 (try --help)" ;;
   esac
 done
 
+[ -f "$ENV_EXAMPLE" ] || die "missing $ENV_EXAMPLE"
+
 if [ -f "$ENV_FILE" ] && [ "$FORCE" -ne 1 ]; then
-  die ".env already exists ($ENV_FILE) - use --force to overwrite"
+  if is_interactive && confirm ".env already exists ($ENV_FILE) - overwrite?" n; then
+    FORCE=1
+  elif is_interactive; then
+    info "nothing changed"
+    exit 0
+  else
+    die ".env already exists ($ENV_FILE) - use --force to overwrite"
+  fi
 fi
 
-[ -f "$ENV_EXAMPLE" ] || die "missing $ENV_EXAMPLE"
-cp "$ENV_EXAMPLE" "$ENV_FILE"
+# An existing .env supplies the defaults when it is being regenerated.
+DEFAULTS_FILE="$ENV_EXAMPLE"
+if [ -f "$ENV_FILE" ]; then
+  DEFAULTS_FILE="$ENV_FILE"
+fi
 
-project_name="$(sanitize_name "${NAME:-$(basename "$ROOT")}")"
+# default_value KEY FALLBACK -> value from the existing .env or .env.example
+default_value() {
+  local value
+  if value="$(env_get "$1" "$DEFAULTS_FILE")"; then
+    printf '%s' "$value"
+  else
+    printf '%s' "${2:-}"
+  fi
+}
+
+valid_text() { [ -n "$1" ]; }
+valid_wp_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
+valid_php_branch() {
+  case " $PHP_BRANCHES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+valid_image_version() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]]; }
+valid_db_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
+valid_identifier() { [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]; }
+valid_email() { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
+valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+printf '\n'
+if is_interactive; then
+  printf '\033[1mProject\033[0m\n'
+fi
+
+if [ "$DEFAULTS_FILE" = "$ENV_FILE" ]; then
+  project_default="$(default_value COMPOSE_PROJECT_NAME "$(sanitize_name "$(basename "$ROOT")")")"
+else
+  project_default="$(sanitize_name "$(basename "$ROOT")")"
+fi
+project_name="$(ask "$(sanitize_name "$NAME")" "Compose project name" "$project_default" valid_text)"
+project_name="$(sanitize_name "$project_name")"
 [ -n "$project_name" ] || project_name="wp-quick-env"
-env_set COMPOSE_PROJECT_NAME "$project_name"
-env_set HOST_UID "$(id -u)"
-env_set HOST_GID "$(id -g)"
+
+wp_version="$(ask "$OPT_WP" "WordPress version" "$(default_value WP_VERSION 7.1)" valid_wp_version)"
+
+if is_interactive; then
+  printf '\n\033[1mPHP\033[0m\n'
+  printf '  patched builds: %s\n' "$SURY_PHP_BRANCHES"
+  printf '    ondrej/sury backports (EOL upstream, rebuilt with fixes)\n'
+  printf '  patched builds: %s\n' "$OFFICIAL_PHP_BRANCHES"
+  printf '    official WordPress image (tracks upstream patch releases)\n'
+fi
+php_version="$(ask "$OPT_PHP" "PHP version" "$(default_value PHP_VERSION 8.4)" valid_php_branch)"
+php_source="$(php_source_for "$php_version")" ||
+  die "PHP $php_version has no patched build - choose one of: $PHP_BRANCHES"
+
+if [ -z "$OPT_COMPOSER" ]; then
+  composer_default="$(default_value COMPOSER_VERSION 2)"
+  if [ "$composer_default" = "2" ] && version_lt "$php_version" "7.2"; then
+    composer_default="$(composer_for_php "$php_version")"
+  fi
+else
+  composer_default=""
+fi
+
+node_version="$(ask "$OPT_NODE" "Node version" "$(default_value NODE_VERSION 24)" valid_image_version)"
+mariadb_version="$(ask "$OPT_MARIADB" "MariaDB version" "$(default_value MARIADB_VERSION 11.4)" valid_db_version)"
+phpmyadmin_version="$(ask "$OPT_PHPMYADMIN" "phpMyAdmin version" "$(default_value PHPMYADMIN_VERSION 5.2)" valid_db_version)"
+wp_cli_version="$(ask "$OPT_WP_CLI" "wp-cli version" "$(default_value WP_CLI_VERSION 2.12.0)" valid_image_version)"
+composer_version="$(ask "$OPT_COMPOSER" "Composer version" "$composer_default" valid_image_version)"
+
+min_php="$(wp_min_php "$wp_version")"
+if version_lt "$php_version" "$min_php"; then
+  warn "WordPress $wp_version expects PHP >= $min_php, but PHP $php_version was selected"
+  if is_interactive && ! confirm "Continue anyway?" n; then
+    info "nothing changed"
+    exit 1
+  fi
+fi
+
+if is_interactive; then
+  printf '\n\033[1mDatabase\033[0m\n'
+fi
+db_root_password="$(ask_secret "$OPT_DB_ROOT" "MariaDB root password" "$(default_value MYSQL_ROOT_PASSWORD root)")"
+db_name="$(ask "$OPT_DB_NAME" "Database name" "$(default_value WORDPRESS_DB_NAME wordpress)" valid_identifier)"
+db_user="$(ask "$OPT_DB_USER" "Database user" "$(default_value WORDPRESS_DB_USER wordpress)" valid_identifier)"
+db_password="$(ask_secret "$OPT_DB_PASSWORD" "Database password" "$(default_value WORDPRESS_DB_PASSWORD wordpress)")"
+db_prefix="$(ask "$OPT_DB_PREFIX" "Table prefix" "$(default_value WORDPRESS_TABLE_PREFIX wp_)" valid_identifier)"
+
+if is_interactive; then
+  printf '\n\033[1mWordPress install\033[0m\n'
+fi
+site_title="$(ask "$OPT_TITLE" "Site title" "$(default_value WP_TITLE 'WordPress Dev')" valid_text)"
+admin_user="$(ask "$OPT_ADMIN_USER" "Admin username" "$(default_value WP_ADMIN_USER admin)" valid_identifier)"
+admin_password="$(ask_secret "$OPT_ADMIN_PASSWORD" "Admin password" "$(default_value WP_ADMIN_PASSWORD admin)")"
+admin_email="$(ask "$OPT_ADMIN_EMAIL" "Admin email" "$(default_value WP_ADMIN_EMAIL admin@example.com)" valid_email)"
+theme_dir="$(ask "$OPT_THEME" "Theme dir (blank for now)" "$(default_value THEME_DIR "")")"
+
+# Flags bypass the prompt validators, so check the final values once more.
+valid_wp_version "$wp_version" || die "invalid WordPress version: $wp_version"
+valid_php_branch "$php_version" || die "invalid PHP branch: $php_version (choose one of: $PHP_BRANCHES)"
+valid_image_version "$node_version" || die "invalid Node version: $node_version"
+valid_db_version "$mariadb_version" || die "invalid MariaDB version: $mariadb_version"
+valid_db_version "$phpmyadmin_version" || die "invalid phpMyAdmin version: $phpmyadmin_version"
+valid_image_version "$wp_cli_version" || die "invalid wp-cli version: $wp_cli_version"
+valid_image_version "$composer_version" || die "invalid Composer version: $composer_version"
+composer_runs_on_php "$composer_version" "$php_version" ||
+  die "Composer $composer_version needs PHP >= 7.2.5 - use COMPOSER_VERSION=2.2 with PHP $php_version"
+valid_identifier "$db_name" || die "invalid database name: $db_name"
+valid_identifier "$db_user" || die "invalid database user: $db_user"
+valid_identifier "$db_prefix" || die "invalid table prefix: $db_prefix"
+valid_text "$site_title" || die "site title must not be empty"
+valid_identifier "$admin_user" || die "invalid admin username: $admin_user"
+valid_email "$admin_email" || die "invalid admin email: $admin_email"
+
+# --- ports ------------------------------------------------------------------
+
+port_default_wp="$(default_value WP_PORT 8080)"
+port_default_pma="$(default_value PMA_PORT 8081)"
+port_default_vite="$(default_value VITE_PORT 5173)"
 
 if [ "$NO_RANDOM" -eq 1 ]; then
   base=""
-  wp_port="${WP_PORT:-$(env_get WP_PORT)}"
-  pma_port="${PMA_PORT:-$(env_get PMA_PORT)}"
-  vite_port="${VITE_PORT:-$(env_get VITE_PORT)}"
-else
-  if [ -n "$BASE" ]; then
-    [[ "$BASE" =~ ^[0-9]+$ ]] || die "--base must be numeric (e.g. --base 20500)"
-    base="$BASE"
-  else
+elif [ -n "$BASE" ]; then
+  valid_port "$BASE" || die "--base must be a port between 1024 and 65535"
+  base="$BASE"
+elif [ -n "$WP_PORT$PMA_PORT$VITE_PORT" ]; then
+  base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+elif is_interactive; then
+  if confirm "Allocate a random free port block?" y; then
     base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+  else
+    base="$(ask "" "Port block base (WP, +1 phpMyAdmin, +10 Vite)" "$port_default_wp" valid_port)"
   fi
+else
+  base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+fi
+
+if [ -n "$base" ]; then
   wp_port="${WP_PORT:-$base}"
   pma_port="${PMA_PORT:-$((base + 1))}"
   vite_port="${VITE_PORT:-$((base + 10))}"
+else
+  wp_port="${WP_PORT:-$port_default_wp}"
+  pma_port="${PMA_PORT:-$port_default_pma}"
+  vite_port="${VITE_PORT:-$port_default_vite}"
 fi
 
 for key in "$wp_port" "$pma_port" "$vite_port"; do
@@ -103,15 +312,46 @@ for spec in "WP_PORT:$wp_port" "PMA_PORT:$pma_port" "VITE_PORT:$vite_port"; do
   fi
 done
 
+# --- write ------------------------------------------------------------------
+
+cp "$ENV_EXAMPLE" "$ENV_FILE"
+
+env_set COMPOSE_PROJECT_NAME "$project_name"
+env_set HOST_UID "$(id -u)"
+env_set HOST_GID "$(id -g)"
+env_set WP_VERSION "$wp_version"
+env_set PHP_VERSION "$php_version"
+env_set PHP_SOURCE "$php_source"
+env_set NODE_VERSION "$node_version"
+env_set WP_CLI_VERSION "$wp_cli_version"
+env_set COMPOSER_VERSION "$composer_version"
+env_set MARIADB_VERSION "$mariadb_version"
+env_set PHPMYADMIN_VERSION "$phpmyadmin_version"
 env_set WP_PORT "$wp_port"
 env_set PMA_PORT "$pma_port"
 env_set VITE_PORT "$vite_port"
+env_set MYSQL_ROOT_PASSWORD "$db_root_password"
+env_set WORDPRESS_DB_NAME "$db_name"
+env_set WORDPRESS_DB_USER "$db_user"
+env_set WORDPRESS_DB_PASSWORD "$db_password"
+env_set WORDPRESS_TABLE_PREFIX "$db_prefix"
+env_set WP_TITLE "$site_title"
+env_set WP_ADMIN_USER "$admin_user"
+env_set WP_ADMIN_PASSWORD "$admin_password"
+env_set WP_ADMIN_EMAIL "$admin_email"
+env_set THEME_DIR "$theme_dir"
+
+if version_lt "$php_version" "7.2"; then
+  info "PHP $php_version is below 7.2 - Composer $composer_version is pinned for compatibility"
+fi
 
 ok ".env written to $ENV_FILE"
 printf '\n'
 printf '  project      %s\n' "$project_name"
+printf '  php          %s (%s)\n' "$php_version" "$(php_source_label "$php_source")"
 printf '  wordpress    http://localhost:%s\n' "$wp_port"
 printf '  phpmyadmin   http://localhost:%s\n' "$pma_port"
 printf '  vite         http://localhost:%s\n' "$vite_port"
+printf '  admin        %s (password in .env)\n' "$admin_user"
 printf '\n'
 info "next: task start   (or: docker compose up -d --build)"
