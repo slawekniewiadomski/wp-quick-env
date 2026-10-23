@@ -13,12 +13,12 @@ tasks:
       - task --list-all
 
   init:
-    desc: Create .env with the host UID/GID and a random free port block
+    desc: Create .env interactively (host UID/GID, versions, ports, credentials)
     cmds:
-      - ./bin/init
+      - ./bin/init {{.CLI_ARGS}}
 
   check:
-    desc: Validate image tags and port availability
+    desc: Validate image tags, PHP source and port availability
     cmds:
       - ./bin/check
 
