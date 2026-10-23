@@ -104,8 +104,13 @@ RUN set -eux; \
 COPY --from=wp-src /usr/src/wordpress /usr/src/wordpress
 COPY --from=wp-src /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
+# --- multi-PHP debug support ------------------------------------------------
+# Copy custom entrypoint that sets up version-specific debug.log
+COPY entrypoint-multi-php.sh /usr/local/bin/entrypoint-multi-php.sh
+RUN chmod +x /usr/local/bin/entrypoint-multi-php.sh
+
 WORKDIR /var/www/html
 ENV WP_CLI_CACHE_DIR=/tmp/wp-cli-cache
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["entrypoint-multi-php.sh"]
 CMD ["apache2-foreground"]

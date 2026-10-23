@@ -47,4 +47,11 @@ RUN set -eux; \
       usermod -u "${HOST_UID}" www-data; \
     fi
 
+# --- multi-PHP debug support ------------------------------------------------
+# Copy custom entrypoint that sets up version-specific debug.log
+COPY entrypoint-multi-php.sh /usr/local/bin/entrypoint-multi-php.sh
+RUN chmod +x /usr/local/bin/entrypoint-multi-php.sh
+
 ENV WP_CLI_CACHE_DIR=/tmp/wp-cli-cache
+ENTRYPOINT ["entrypoint-multi-php.sh"]
+CMD ["apache2-foreground"]
