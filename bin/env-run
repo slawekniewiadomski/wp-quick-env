@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Run a command with the variables from an env file exported.
+#
+# Unlike `. file`, this parses KEY=VALUE literally: no expansion, no command
+# substitution, so values with spaces, '$' or '#' are safe. Surrounding single
+# or double quotes are stripped.
+#
+# Usage: bin/env-run <env-file> <command> [args...]
+set -euo pipefail
+
+[ $# -ge 2 ] || {
+  echo "usage: bin/env-run <env-file> <command> [args...]" >&2
+  exit 2
+}
+
+envfile="$1"
+shift
+[ -f "$envfile" ] || {
+  echo "env-run: no such file: $envfile" >&2
+  exit 1
+}
+
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *) continue ;;
+  esac
+  key="${line%%=*}"
+  val="${line#*=}"
+  # Ignore 'export ' prefixes and invalid keys.
+  key="${key#export }"
+  case "$key" in
+    '' | *[!A-Za-z0-9_]*) continue ;;
+  esac
+  case "$val" in
+    \"*\") val="${val#\"}"; val="${val%\"}" ;;
+    \'*\') val="${val#\'}"; val="${val%\'}" ;;
+  esac
+  export "$key=$val"
+done <"$envfile"
+
+# Scripts like bin/wp read ENV_FILE to pick the compose project.
+export ENV_FILE="$envfile"
+
+exec "$@"
