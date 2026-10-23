@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Validate the version matrix (image tags exist) and port availability before
-# starting the stack, so failures are one readable line instead of a raw pull
-# or bind error.
+# Validate the version matrix (image tags, PHP source) and port availability
+# before starting the stack, so failures are one readable line instead of a raw
+# pull or bind error.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +19,21 @@ PHPMYADMIN_VERSION="$(env_get PHPMYADMIN_VERSION)"
 WP_PORT="$(env_get WP_PORT)"
 PMA_PORT="$(env_get PMA_PORT)"
 VITE_PORT="$(env_get VITE_PORT)"
+
+php_source="$(env_get PHP_SOURCE || true)"
+expected_source="$(php_source_for "$PHP_VERSION" || true)"
+if [ -z "$expected_source" ]; then
+  die "PHP $PHP_VERSION has no patched build - use one of: $PHP_BRANCHES"
+fi
+if [ -z "$php_source" ]; then
+  if [ "$expected_source" = "sury" ]; then
+    die "PHP_SOURCE is missing in .env - add PHP_SOURCE=sury (or run ./bin/init --force)"
+  fi
+  php_source="$expected_source"
+fi
+if [ "$php_source" != "$expected_source" ]; then
+  die "PHP_SOURCE=$php_source does not match PHP $PHP_VERSION (expected $expected_source)"
+fi
 
 failures=0
 
@@ -40,13 +55,53 @@ check_image() {
   fi
 }
 
+sury_branch_available() {
+  local version="$1" count
+  count="$(curl -fsSL \
+    "https://packages.sury.org/php/dists/bookworm/main/binary-amd64/Packages.gz" |
+    gzip -dc | grep -cE "^Package: php${version}-cli$" || true)"
+  [ "${count:-0}" -gt 0 ]
+}
+
+check_sury_branch() {
+  local version="$1"
+  if sury_branch_available "$version"; then
+    printf '\033[32m✓\033[0m %-12s php%s (packages.sury.org)\n' "php branch" "$version"
+  else
+    printf '\033[31m✗\033[0m %-12s php%s not in packages.sury.org\n' "php branch" "$version"
+    printf '    %s\n' "Pick another branch from: $PHP_BRANCHES"
+    failures=$((failures + 1))
+  fi
+}
+
 info "version matrix (.env)"
-check_image "wordpress" "wordpress:${WP_VERSION}-php${PHP_VERSION}-apache" \
-  "No such tag - pick a valid combination from https://hub.docker.com/_/wordpress/tags"
+printf '\033[32m✓\033[0m %-12s php%s (%s)\n' "php source" "$PHP_VERSION" "$(php_source_label "$php_source")"
+
+if [ "$php_source" = "sury" ]; then
+  check_image "debian" "debian:bookworm" "Base for the sury PHP build"
+  check_image "wp source" "wordpress:${WP_VERSION}" \
+    "Copied into the sury image - no such WordPress version"
+  check_sury_branch "$PHP_VERSION"
+else
+  check_image "wordpress" "wordpress:${WP_VERSION}-php${PHP_VERSION}-apache" \
+    "No such tag - pick a valid combination from https://hub.docker.com/_/wordpress/tags"
+fi
+
 check_image "mariadb" "mariadb:${MARIADB_VERSION}" ""
 check_image "phpmyadmin" "phpmyadmin:${PHPMYADMIN_VERSION}" ""
 check_image "node" "node:${NODE_VERSION}" "See https://hub.docker.com/_/node/tags"
 check_image "composer" "composer:${COMPOSER_VERSION}" "See https://hub.docker.com/_/composer/tags"
+
+if ! composer_runs_on_php "$COMPOSER_VERSION" "$PHP_VERSION"; then
+  printf '\033[31m✗\033[0m %-12s Composer %s needs PHP >= 7.2.5\n' "composer" "$COMPOSER_VERSION"
+  printf '    %s\n' "Use COMPOSER_VERSION=2.2 with PHP ${PHP_VERSION}"
+  failures=$((failures + 1))
+fi
+
+min_php="$(wp_min_php "$WP_VERSION")"
+if version_lt "$PHP_VERSION" "$min_php"; then
+  warn "WordPress $WP_VERSION expects PHP >= $min_php, but PHP $PHP_VERSION is selected"
+fi
 
 printf '\n'
 info "ports (.env)"
