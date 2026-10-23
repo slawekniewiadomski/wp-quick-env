@@ -29,6 +29,27 @@ task theme:clone -- https://github.com/your/theme my-theme
 
 This clones your theme into `wp-content/themes/my-theme` and sets `THEME_DIR` in `.env` for Node/Composer tasks.
 
+### Compare two PHP versions (opt-in)
+
+Debugging a PHP upgrade? Run the same theme on two PHP versions at once, each on its own ports with its own database and debug log, then crawl both and diff the errors.
+
+```bash
+task init --multi-php 7.4,8.0      # writes .env.php74 and .env.php80 (+ normal .env)
+task start:all                     # start both stacks
+task install:php74                 # install each once
+task install:php80
+task debug:compare                 # crawl both, report new PHP/JS errors
+```
+
+- Single-stack mode is untouched: without `--multi-php` nothing changes.
+- `wp-content/themes` is shared, so both stacks serve the same theme.
+- Each stack has its own `COMPOSE_PROJECT_NAME`, port block, database volume and `wp-content/debug.log.phpXX`.
+- `WP_DEBUG`, `WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY` and `SCRIPT_DEBUG` are on, so warnings appear in the page and in the log.
+- `task debug:compare` discovers URLs via wp-cli (posts, pages, categories, tags, authors), crawls both stacks with a headless browser, and reports URLs where the newer PHP adds PHP or JS errors or changes the status code.
+- Crawler prerequisite: `pip install playwright && playwright install chromium`.
+
+Other multi-php tasks: `start:php74`, `stop:all`, `wp:php80 -- …`, `shell:php74`, `logs:php80`, `debug:logs`.
+
 ### New project from this template
 
 ```bash
