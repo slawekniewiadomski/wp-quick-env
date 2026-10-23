@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Create .env for this checkout: host UID/GID, project name, versions, ports
 # and credentials. Asks for the values when run in a terminal.
+#
+# Default mode writes a single .env (one stack).
+# `--multi-php V1,V2` additionally writes .env.phpV1 / .env.phpV2 so the same
+# theme can run on two PHP versions at once (debug compare). Opt-in only.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,9 +47,16 @@ Options:
   --pma-port PORT          Explicit phpMyAdmin port
   --vite-port PORT         Explicit Vite port
   --no-random              Keep the fixed port defaults from .env.example
-  --force                  Overwrite an existing .env without asking
+  --force                  Overwrite existing .env files without asking
   -y, --yes                Accept all defaults, never prompt
   -h, --help               Show this help
+
+Multi-PHP debug compare (opt-in)
+  --multi-php V1,V2        Write .env.php<V1> and .env.php<V2> next to the
+                           normal .env, each with its own project name and
+                           port block, sharing wp-content/themes. Then use
+                           `task start:php74`, `task debug:compare`, ...
+                           Example: --multi-php 7.4,8.0
 EOF
 }
 
@@ -57,6 +68,7 @@ VITE_PORT=""
 NO_RANDOM=0
 FORCE=0
 ASSUME_YES=0
+MULTI_PHP=""
 OPT_WP=""
 OPT_PHP=""
 OPT_NODE=""
@@ -121,6 +133,8 @@ while [ $# -gt 0 ]; do
     --pma-port=*) PMA_PORT="${1#*=}"; shift ;;
     --vite-port) VITE_PORT="${2:-}"; shift 2 ;;
     --vite-port=*) VITE_PORT="${1#*=}"; shift ;;
+    --multi-php) MULTI_PHP="${2:-}"; shift 2 ;;
+    --multi-php=*) MULTI_PHP="${1#*=}"; shift ;;
     --no-random) NO_RANDOM=1; shift ;;
     --force) FORCE=1; shift ;;
     -y | --yes) ASSUME_YES=1; shift ;;
@@ -131,227 +145,412 @@ done
 
 [ -f "$ENV_EXAMPLE" ] || die "missing $ENV_EXAMPLE"
 
-if [ -f "$ENV_FILE" ] && [ "$FORCE" -ne 1 ]; then
-  if is_interactive && confirm ".env already exists ($ENV_FILE) - overwrite?" n; then
-    FORCE=1
-  elif is_interactive; then
-    info "nothing changed"
-    exit 0
+# --- single stack -----------------------------------------------------------
+# Writes the file at $ENV_FILE using the OPT_* / NAME / BASE overrides.
+# DEFAULTS_FILE_OVERRIDE lets the multi-php path seed both env files from .env.
+single_stack_init() {
+  if [ -f "$ENV_FILE" ] && [ "$FORCE" -ne 1 ]; then
+    if is_interactive && confirm ".env already exists ($ENV_FILE) - overwrite?" n; then
+      FORCE=1
+    elif is_interactive; then
+      info "nothing changed"
+      return 0
+    else
+      die ".env already exists ($ENV_FILE) - use --force to overwrite"
+    fi
+  fi
+
+  # An existing .env supplies the defaults when it is being regenerated.
+  local defaults_file="${DEFAULTS_FILE_OVERRIDE:-$ENV_EXAMPLE}"
+  if [ -z "${DEFAULTS_FILE_OVERRIDE:-}" ] && [ -f "$ENV_FILE" ]; then
+    defaults_file="$ENV_FILE"
+  fi
+
+  # default_value KEY FALLBACK -> value from the defaults file or fallback
+  default_value() {
+    local value
+    if value="$(env_get "$1" "$defaults_file")"; then
+      printf '%s' "$value"
+    else
+      printf '%s' "${2:-}"
+    fi
+  }
+
+  printf '\n'
+  if is_interactive; then
+    printf '\033[1mProject\033[0m\n'
+  fi
+
+  if [ "$defaults_file" = "$ENV_FILE" ]; then
+    project_default="$(default_value COMPOSE_PROJECT_NAME "$(sanitize_name "$(basename "$ROOT")")")"
   else
-    die ".env already exists ($ENV_FILE) - use --force to overwrite"
+    project_default="$(sanitize_name "$(basename "$ROOT")")"
   fi
-fi
+  project_name="$(ask "$(sanitize_name "$NAME")" "Compose project name" "$project_default" valid_text)"
+  project_name="$(sanitize_name "$project_name")"
+  [ -n "$project_name" ] || project_name="wp-quick-env"
 
-# An existing .env supplies the defaults when it is being regenerated.
-DEFAULTS_FILE="$ENV_EXAMPLE"
-if [ -f "$ENV_FILE" ]; then
-  DEFAULTS_FILE="$ENV_FILE"
-fi
+  wp_version="$(ask "$OPT_WP" "WordPress version" "$(default_value WP_VERSION 7.1)" valid_wp_version)"
 
-# default_value KEY FALLBACK -> value from the existing .env or .env.example
-default_value() {
-  local value
-  if value="$(env_get "$1" "$DEFAULTS_FILE")"; then
-    printf '%s' "$value"
+  if is_interactive; then
+    printf '\n\033[1mPHP\033[0m\n'
+    printf '  patched builds: %s\n' "$SURY_PHP_BRANCHES"
+    printf '    ondrej/sury backports (EOL upstream, rebuilt with fixes)\n'
+    printf '  patched builds: %s\n' "$OFFICIAL_PHP_BRANCHES"
+    printf '    official WordPress image (tracks upstream patch releases)\n'
+  fi
+  php_version="$(ask "$OPT_PHP" "PHP version" "$(default_value PHP_VERSION 8.4)" valid_php_branch)"
+  php_source="$(php_source_for "$php_version")" ||
+    die "PHP $php_version has no patched build - choose one of: $PHP_BRANCHES"
+
+  if [ -z "$OPT_COMPOSER" ]; then
+    composer_default="$(default_value COMPOSER_VERSION 2)"
+    if [ "$composer_default" = "2" ] && version_lt "$php_version" "7.2"; then
+      composer_default="$(composer_for_php "$php_version")"
+    fi
   else
-    printf '%s' "${2:-}"
+    composer_default=""
   fi
-}
 
-valid_text() { [ -n "$1" ]; }
-valid_wp_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
-valid_php_branch() {
-  case " $PHP_BRANCHES " in
-    *" $1 "*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-valid_image_version() { [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]]; }
-valid_db_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; }
-valid_identifier() { [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]; }
-valid_email() { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
-valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] || return 1
-  [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
-}
+  node_version="$(ask "$OPT_NODE" "Node version" "$(default_value NODE_VERSION 24)" valid_image_version)"
+  mariadb_version="$(ask "$OPT_MARIADB" "MariaDB version" "$(default_value MARIADB_VERSION 11.4)" valid_db_version)"
+  phpmyadmin_version="$(ask "$OPT_PHPMYADMIN" "phpMyAdmin version" "$(default_value PHPMYADMIN_VERSION 5.2)" valid_db_version)"
+  wp_cli_version="$(ask "$OPT_WP_CLI" "wp-cli version" "$(default_value WP_CLI_VERSION 2.12.0)" valid_image_version)"
+  composer_version="$(ask "$OPT_COMPOSER" "Composer version" "$composer_default" valid_image_version)"
 
-printf '\n'
-if is_interactive; then
-  printf '\033[1mProject\033[0m\n'
-fi
-
-if [ "$DEFAULTS_FILE" = "$ENV_FILE" ]; then
-  project_default="$(default_value COMPOSE_PROJECT_NAME "$(sanitize_name "$(basename "$ROOT")")")"
-else
-  project_default="$(sanitize_name "$(basename "$ROOT")")"
-fi
-project_name="$(ask "$(sanitize_name "$NAME")" "Compose project name" "$project_default" valid_text)"
-project_name="$(sanitize_name "$project_name")"
-[ -n "$project_name" ] || project_name="wp-quick-env"
-
-wp_version="$(ask "$OPT_WP" "WordPress version" "$(default_value WP_VERSION 7.1)" valid_wp_version)"
-
-if is_interactive; then
-  printf '\n\033[1mPHP\033[0m\n'
-  printf '  patched builds: %s\n' "$SURY_PHP_BRANCHES"
-  printf '    ondrej/sury backports (EOL upstream, rebuilt with fixes)\n'
-  printf '  patched builds: %s\n' "$OFFICIAL_PHP_BRANCHES"
-  printf '    official WordPress image (tracks upstream patch releases)\n'
-fi
-php_version="$(ask "$OPT_PHP" "PHP version" "$(default_value PHP_VERSION 8.4)" valid_php_branch)"
-php_source="$(php_source_for "$php_version")" ||
-  die "PHP $php_version has no patched build - choose one of: $PHP_BRANCHES"
-
-if [ -z "$OPT_COMPOSER" ]; then
-  composer_default="$(default_value COMPOSER_VERSION 2)"
-  if [ "$composer_default" = "2" ] && version_lt "$php_version" "7.2"; then
-    composer_default="$(composer_for_php "$php_version")"
+  min_php="$(wp_min_php "$wp_version")"
+  if version_lt "$php_version" "$min_php"; then
+    warn "WordPress $wp_version expects PHP >= $min_php, but PHP $php_version was selected"
+    if is_interactive && ! confirm "Continue anyway?" n; then
+      info "nothing changed"
+      return 1
+    fi
   fi
-else
-  composer_default=""
-fi
 
-node_version="$(ask "$OPT_NODE" "Node version" "$(default_value NODE_VERSION 24)" valid_image_version)"
-mariadb_version="$(ask "$OPT_MARIADB" "MariaDB version" "$(default_value MARIADB_VERSION 11.4)" valid_db_version)"
-phpmyadmin_version="$(ask "$OPT_PHPMYADMIN" "phpMyAdmin version" "$(default_value PHPMYADMIN_VERSION 5.2)" valid_db_version)"
-wp_cli_version="$(ask "$OPT_WP_CLI" "wp-cli version" "$(default_value WP_CLI_VERSION 2.12.0)" valid_image_version)"
-composer_version="$(ask "$OPT_COMPOSER" "Composer version" "$composer_default" valid_image_version)"
-
-min_php="$(wp_min_php "$wp_version")"
-if version_lt "$php_version" "$min_php"; then
-  warn "WordPress $wp_version expects PHP >= $min_php, but PHP $php_version was selected"
-  if is_interactive && ! confirm "Continue anyway?" n; then
-    info "nothing changed"
-    exit 1
+  if is_interactive; then
+    printf '\n\033[1mDatabase\033[0m\n'
   fi
-fi
+  db_root_password="$(ask_secret "$OPT_DB_ROOT" "MariaDB root password" "$(default_value MYSQL_ROOT_PASSWORD root)")"
+  db_name="$(ask "$OPT_DB_NAME" "Database name" "$(default_value WORDPRESS_DB_NAME wordpress)" valid_identifier)"
+  db_user="$(ask "$OPT_DB_USER" "Database user" "$(default_value WORDPRESS_DB_USER wordpress)" valid_identifier)"
+  db_password="$(ask_secret "$OPT_DB_PASSWORD" "Database password" "$(default_value WORDPRESS_DB_PASSWORD wordpress)")"
+  db_prefix="$(ask "$OPT_DB_PREFIX" "Table prefix" "$(default_value WORDPRESS_TABLE_PREFIX wp_)" valid_identifier)"
 
-if is_interactive; then
-  printf '\n\033[1mDatabase\033[0m\n'
-fi
-db_root_password="$(ask_secret "$OPT_DB_ROOT" "MariaDB root password" "$(default_value MYSQL_ROOT_PASSWORD root)")"
-db_name="$(ask "$OPT_DB_NAME" "Database name" "$(default_value WORDPRESS_DB_NAME wordpress)" valid_identifier)"
-db_user="$(ask "$OPT_DB_USER" "Database user" "$(default_value WORDPRESS_DB_USER wordpress)" valid_identifier)"
-db_password="$(ask_secret "$OPT_DB_PASSWORD" "Database password" "$(default_value WORDPRESS_DB_PASSWORD wordpress)")"
-db_prefix="$(ask "$OPT_DB_PREFIX" "Table prefix" "$(default_value WORDPRESS_TABLE_PREFIX wp_)" valid_identifier)"
+  if is_interactive; then
+    printf '\n\033[1mWordPress install\033[0m\n'
+  fi
+  site_title="$(ask "$OPT_TITLE" "Site title" "$(default_value WP_TITLE 'WordPress Dev')" valid_text)"
+  admin_user="$(ask "$OPT_ADMIN_USER" "Admin username" "$(default_value WP_ADMIN_USER admin)" valid_identifier)"
+  admin_password="$(ask_secret "$OPT_ADMIN_PASSWORD" "Admin password" "$(default_value WP_ADMIN_PASSWORD admin)")"
+  admin_email="$(ask "$OPT_ADMIN_EMAIL" "Admin email" "$(default_value WP_ADMIN_EMAIL admin@example.com)" valid_email)"
+  theme_dir="$(ask "$OPT_THEME" "Theme dir (blank for now)" "$(default_value THEME_DIR "")")"
 
-if is_interactive; then
-  printf '\n\033[1mWordPress install\033[0m\n'
-fi
-site_title="$(ask "$OPT_TITLE" "Site title" "$(default_value WP_TITLE 'WordPress Dev')" valid_text)"
-admin_user="$(ask "$OPT_ADMIN_USER" "Admin username" "$(default_value WP_ADMIN_USER admin)" valid_identifier)"
-admin_password="$(ask_secret "$OPT_ADMIN_PASSWORD" "Admin password" "$(default_value WP_ADMIN_PASSWORD admin)")"
-admin_email="$(ask "$OPT_ADMIN_EMAIL" "Admin email" "$(default_value WP_ADMIN_EMAIL admin@example.com)" valid_email)"
-theme_dir="$(ask "$OPT_THEME" "Theme dir (blank for now)" "$(default_value THEME_DIR "")")"
+  # Flags bypass the prompt validators, so check the final values once more.
+  valid_wp_version "$wp_version" || die "invalid WordPress version: $wp_version"
+  valid_php_branch "$php_version" || die "invalid PHP branch: $php_version (choose one of: $PHP_BRANCHES)"
+  valid_image_version "$node_version" || die "invalid Node version: $node_version"
+  valid_db_version "$mariadb_version" || die "invalid MariaDB version: $mariadb_version"
+  valid_db_version "$phpmyadmin_version" || die "invalid phpMyAdmin version: $phpmyadmin_version"
+  valid_image_version "$wp_cli_version" || die "invalid wp-cli version: $wp_cli_version"
+  valid_image_version "$composer_version" || die "invalid Composer version: $composer_version"
+  composer_runs_on_php "$composer_version" "$php_version" ||
+    die "Composer $composer_version needs PHP >= 7.2.5 - use COMPOSER_VERSION=2.2 with PHP $php_version"
+  valid_identifier "$db_name" || die "invalid database name: $db_name"
+  valid_identifier "$db_user" || die "invalid database user: $db_user"
+  valid_identifier "$db_prefix" || die "invalid table prefix: $db_prefix"
+  valid_text "$site_title" || die "site title must not be empty"
+  valid_identifier "$admin_user" || die "invalid admin username: $admin_user"
+  valid_email "$admin_email" || die "invalid admin email: $admin_email"
 
-# Flags bypass the prompt validators, so check the final values once more.
-valid_wp_version "$wp_version" || die "invalid WordPress version: $wp_version"
-valid_php_branch "$php_version" || die "invalid PHP branch: $php_version (choose one of: $PHP_BRANCHES)"
-valid_image_version "$node_version" || die "invalid Node version: $node_version"
-valid_db_version "$mariadb_version" || die "invalid MariaDB version: $mariadb_version"
-valid_db_version "$phpmyadmin_version" || die "invalid phpMyAdmin version: $phpmyadmin_version"
-valid_image_version "$wp_cli_version" || die "invalid wp-cli version: $wp_cli_version"
-valid_image_version "$composer_version" || die "invalid Composer version: $composer_version"
-composer_runs_on_php "$composer_version" "$php_version" ||
-  die "Composer $composer_version needs PHP >= 7.2.5 - use COMPOSER_VERSION=2.2 with PHP $php_version"
-valid_identifier "$db_name" || die "invalid database name: $db_name"
-valid_identifier "$db_user" || die "invalid database user: $db_user"
-valid_identifier "$db_prefix" || die "invalid table prefix: $db_prefix"
-valid_text "$site_title" || die "site title must not be empty"
-valid_identifier "$admin_user" || die "invalid admin username: $admin_user"
-valid_email "$admin_email" || die "invalid admin email: $admin_email"
+  # --- ports ----------------------------------------------------------------
 
-# --- ports ------------------------------------------------------------------
+  port_default_wp="$(default_value WP_PORT 8080)"
+  port_default_pma="$(default_value PMA_PORT 8081)"
+  port_default_vite="$(default_value VITE_PORT 5173)"
 
-port_default_wp="$(default_value WP_PORT 8080)"
-port_default_pma="$(default_value PMA_PORT 8081)"
-port_default_vite="$(default_value VITE_PORT 5173)"
-
-if [ "$NO_RANDOM" -eq 1 ]; then
-  base=""
-elif [ -n "$BASE" ]; then
-  valid_port "$BASE" || die "--base must be a port between 1024 and 65535"
-  base="$BASE"
-elif [ -n "$WP_PORT$PMA_PORT$VITE_PORT" ]; then
-  base="$(pick_base)" || die "could not find a free port block in 20000-29999"
-elif is_interactive; then
-  if confirm "Allocate a random free port block?" y; then
+  if [ "$NO_RANDOM" -eq 1 ]; then
+    base=""
+  elif [ -n "$BASE" ]; then
+    valid_port "$BASE" || die "--base must be a port between 1024 and 65535"
+    base="$BASE"
+  elif [ -n "$WP_PORT$PMA_PORT$VITE_PORT" ]; then
     base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+  elif is_interactive; then
+    if confirm "Allocate a random free port block?" y; then
+      base="$(pick_base)" || die "could not find a free port block in 20000-29999"
+    else
+      base="$(ask "" "Port block base (WP, +1 phpMyAdmin, +10 Vite)" "$port_default_wp" valid_port)"
+    fi
   else
-    base="$(ask "" "Port block base (WP, +1 phpMyAdmin, +10 Vite)" "$port_default_wp" valid_port)"
+    base="$(pick_base)" || die "could not find a free port block in 20000-29999"
   fi
-else
-  base="$(pick_base)" || die "could not find a free port block in 20000-29999"
-fi
 
-if [ -n "$base" ]; then
-  wp_port="${WP_PORT:-$base}"
-  pma_port="${PMA_PORT:-$((base + 1))}"
-  vite_port="${VITE_PORT:-$((base + 10))}"
-else
-  wp_port="${WP_PORT:-$port_default_wp}"
-  pma_port="${PMA_PORT:-$port_default_pma}"
-  vite_port="${VITE_PORT:-$port_default_vite}"
-fi
-
-for key in "$wp_port" "$pma_port" "$vite_port"; do
-  [[ "$key" =~ ^[0-9]+$ ]] || die "invalid port: $key"
-  [ "$key" -ge 1024 ] && [ "$key" -le 65535 ] || die "port out of range: $key"
-done
-
-if [ "$wp_port" = "$pma_port" ] || [ "$wp_port" = "$vite_port" ] || [ "$pma_port" = "$vite_port" ]; then
-  die "WP_PORT, PMA_PORT and VITE_PORT must all differ"
-fi
-
-for spec in "WP_PORT:$wp_port" "PMA_PORT:$pma_port" "VITE_PORT:$vite_port"; do
-  key="${spec%%:*}"
-  port="${spec#*:}"
-  if port_busy "$port"; then
-    owner="$(port_owner "$port")"
-    die "$key $port is already in use${owner:+ (by $owner)} - pick a free block with --base or override the port"
+  if [ -n "$base" ]; then
+    wp_port="${WP_PORT:-$base}"
+    pma_port="${PMA_PORT:-$((base + 1))}"
+    vite_port="${VITE_PORT:-$((base + 10))}"
+  else
+    wp_port="${WP_PORT:-$port_default_wp}"
+    pma_port="${PMA_PORT:-$port_default_pma}"
+    vite_port="${VITE_PORT:-$port_default_vite}"
   fi
-done
 
-# --- write ------------------------------------------------------------------
+  for key in "$wp_port" "$pma_port" "$vite_port"; do
+    [[ "$key" =~ ^[0-9]+$ ]] || die "invalid port: $key"
+    [ "$key" -ge 1024 ] && [ "$key" -le 65535 ] || die "port out of range: $key"
+  done
 
-cp "$ENV_EXAMPLE" "$ENV_FILE"
+  if [ "$wp_port" = "$pma_port" ] || [ "$wp_port" = "$vite_port" ] || [ "$pma_port" = "$vite_port" ]; then
+    die "WP_PORT, PMA_PORT and VITE_PORT must all differ"
+  fi
 
-env_set COMPOSE_PROJECT_NAME "$project_name"
-env_set HOST_UID "$(id -u)"
-env_set HOST_GID "$(id -g)"
-env_set WP_VERSION "$wp_version"
-env_set PHP_VERSION "$php_version"
-env_set PHP_SOURCE "$php_source"
-env_set NODE_VERSION "$node_version"
-env_set WP_CLI_VERSION "$wp_cli_version"
-env_set COMPOSER_VERSION "$composer_version"
-env_set MARIADB_VERSION "$mariadb_version"
-env_set PHPMYADMIN_VERSION "$phpmyadmin_version"
-env_set WP_PORT "$wp_port"
-env_set PMA_PORT "$pma_port"
-env_set VITE_PORT "$vite_port"
-env_set MYSQL_ROOT_PASSWORD "$db_root_password"
-env_set WORDPRESS_DB_NAME "$db_name"
-env_set WORDPRESS_DB_USER "$db_user"
-env_set WORDPRESS_DB_PASSWORD "$db_password"
-env_set WORDPRESS_TABLE_PREFIX "$db_prefix"
-env_set WP_TITLE "$site_title"
-env_set WP_ADMIN_USER "$admin_user"
-env_set WP_ADMIN_PASSWORD "$admin_password"
-env_set WP_ADMIN_EMAIL "$admin_email"
-env_set THEME_DIR "$theme_dir"
+  for spec in "WP_PORT:$wp_port" "PMA_PORT:$pma_port" "VITE_PORT:$vite_port"; do
+    key="${spec%%:*}"
+    port="${spec#*:}"
+    if port_busy "$port"; then
+      owner="$(port_owner "$port")"
+      die "$key $port is already in use${owner:+ (by $owner)} - pick a free block with --base or override the port"
+    fi
+  done
 
-if version_lt "$php_version" "7.2"; then
-  info "PHP $php_version is below 7.2 - Composer $composer_version is pinned for compatibility"
+  # --- write ----------------------------------------------------------------
+
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+
+  env_set COMPOSE_PROJECT_NAME "$project_name"
+  env_set HOST_UID "$(id -u)"
+  env_set HOST_GID "$(id -g)"
+  env_set WP_VERSION "$wp_version"
+  env_set PHP_VERSION "$php_version"
+  env_set PHP_SOURCE "$php_source"
+  env_set NODE_VERSION "$node_version"
+  env_set WP_CLI_VERSION "$wp_cli_version"
+  env_set COMPOSER_VERSION "$composer_version"
+  env_set MARIADB_VERSION "$mariadb_version"
+  env_set PHPMYADMIN_VERSION "$phpmyadmin_version"
+  env_set WP_PORT "$wp_port"
+  env_set PMA_PORT "$pma_port"
+  env_set VITE_PORT "$vite_port"
+  env_set MYSQL_ROOT_PASSWORD "$db_root_password"
+  env_set WORDPRESS_DB_NAME "$db_name"
+  env_set WORDPRESS_DB_USER "$db_user"
+  env_set WORDPRESS_DB_PASSWORD "$db_password"
+  env_set WORDPRESS_TABLE_PREFIX "$db_prefix"
+  env_set WP_TITLE "$site_title"
+  env_set WP_ADMIN_USER "$admin_user"
+  env_set WP_ADMIN_PASSWORD "$admin_password"
+  env_set WP_ADMIN_EMAIL "$admin_email"
+  env_set THEME_DIR "$theme_dir"
+  env_set WP_DEBUG_LOG_FILE "wp-content/debug.log"
+
+  if version_lt "$php_version" "7.2"; then
+    info "PHP $php_version is below 7.2 - Composer $composer_version is pinned for compatibility"
+  fi
+
+  ok ".env written to $ENV_FILE"
+  printf '\n'
+  printf '  project      %s\n' "$project_name"
+  printf '  php          %s (%s)\n' "$php_version" "$(php_source_label "$php_source")"
+  printf '  wordpress    http://localhost:%s\n' "$wp_port"
+  printf '  phpmyadmin   http://localhost:%s\n' "$pma_port"
+  printf '  vite         http://localhost:%s\n' "$vite_port"
+  printf '  admin        %s (password in .env)\n' "$admin_user"
+  printf '\n'
+  info "next: task start   (or: docker compose up -d --build)"
+}
+
+# --- multi-php --------------------------------------------------------------
+# Adds `task start:phpXX`, `task debug:compare`, ... and writes one .env per
+# PHP version. Each has its own COMPOSE_PROJECT_NAME and port block, so two
+# `docker compose` invocations run side by side without colliding.
+run_multi_php() {
+  local spec="$MULTI_PHP"
+  local php1="${spec%%,*}"
+  local php2="${spec##*,}"
+
+  [ "$php1" != "$php2" ] || die "--multi-php needs two different versions (e.g. 7.4,8.0)"
+  valid_php_branch "$php1" || die "invalid PHP version in --multi-php: $php1"
+  valid_php_branch "$php2" || die "invalid PHP version in --multi-php: $php2"
+
+  local base1="20000" base2="21000"
+  if [ -n "$BASE" ]; then
+    valid_port "$BASE" || die "--base must be a port between 1024 and 65535"
+    base1="$BASE"
+    base2=$((BASE + 1000))
+  fi
+
+  local tag1="${php1//./}" tag2="${php2//./}"
+  local env1="$ROOT/.env.php${tag1}"
+  local env2="$ROOT/.env.php${tag2}"
+
+  if [ -f "$env1" ] || [ -f "$env2" ]; then
+    if [ "$FORCE" -ne 1 ]; then
+      if is_interactive && confirm "Multi-php env already exists - overwrite?" n; then
+        FORCE=1
+      elif is_interactive; then
+        info "nothing changed"
+        return 0
+      else
+        die "multi-php env already exists ($env1) - use --force to overwrite"
+      fi
+    fi
+  fi
+
+  # Baseline single stack so the normal tasks keep working (php1, original).
+  if [ ! -f "$ENV_FILE" ] || [ "$FORCE" -eq 1 ]; then
+    local saved_opt_php="$OPT_PHP" saved_base="$BASE" saved_name="$NAME"
+    OPT_PHP="$php1" BASE="$base1" NAME=""
+    ENV_FILE="$ROOT/.env"
+    single_stack_init
+    OPT_PHP="$saved_opt_php" BASE="$saved_base" NAME="$saved_name"
+    ENV_FILE="$ROOT/.env"
+  fi
+
+  # Two per-version env files, seeded from .env so credentials match.
+  DEFAULTS_FILE_OVERRIDE="$ROOT/.env"
+  local project
+  project="$(env_get COMPOSE_PROJECT_NAME "$ROOT/.env" || sanitize_name "$(basename "$ROOT")")"
+
+  local saved_opt_php="$OPT_PHP" saved_base="$BASE" saved_name="$NAME"
+  ASSUME_YES=1
+  FORCE=1
+
+  OPT_PHP="$php1" BASE="$base1" NAME="${project}-php${tag1}"
+  ENV_FILE="$env1"
+  single_stack_init
+  env_set WP_DEBUG_LOG_FILE "wp-content/debug.log.php${tag1}" "$env1"
+
+  OPT_PHP="$php2" BASE="$base2" NAME="${project}-php${tag2}"
+  ENV_FILE="$env2"
+  single_stack_init
+  env_set WP_DEBUG_LOG_FILE "wp-content/debug.log.php${tag2}" "$env2"
+
+  OPT_PHP="$saved_opt_php" BASE="$saved_base" NAME="$saved_name"
+  ENV_FILE="$ROOT/.env"
+
+  setup_multi_tasks "$tag1" "$tag2"
+  setup_gitignore
+
+  ok "multi-php config ready:"
+  printf '  .env           php %s  http://localhost:%s  (single stack)\n' \
+    "$php1" "$(env_get WP_PORT "$ROOT/.env")"
+  printf '  .env.php%-4s   php %s  http://localhost:%s\n' "$tag1" "$php1" "$(env_get WP_PORT "$env1")"
+  printf '  .env.php%-4s   php %s  http://localhost:%s\n' "$tag2" "$php2" "$(env_get WP_PORT "$env2")"
+  printf '\n'
+  info "next: task start:php${tag1} && task start:php${tag2}"
+  info "      task install:php${tag1} && task install:php${tag2}"
+  info "      task debug:compare"
+}
+
+# Append multi-php tasks to Taskfile.yml once.
+setup_multi_tasks() {
+  local tag1="$1" tag2="$2"
+  local taskfile="$ROOT/Taskfile.yml"
+  [ -f "$taskfile" ] || die "missing $taskfile"
+
+  if grep -q "^  start:php${tag1}:" "$taskfile"; then
+    return 0
+  fi
+
+  cat >> "$taskfile" <<EOF
+
+# --- multi-PHP debug compare (task init --multi-php) ------------------------
+# bin/env-run loads the stack's env file literally (no shell expansion) and
+# exports it, so it overrides the default .env that Task loads for everything
+# else and both stacks can run side by side.
+  start:php${tag1}:
+    desc: Start the PHP ${tag1} stack (from .env.php${tag1})
+    cmds:
+      - ./bin/env-run .env.php${tag1} docker compose up -d --build
+
+  start:php${tag2}:
+    desc: Start the PHP ${tag2} stack (from .env.php${tag2})
+    cmds:
+      - ./bin/env-run .env.php${tag2} docker compose up -d --build
+
+  start:all:
+    desc: Start both PHP stacks
+    cmds:
+      - task: start:php${tag1}
+      - task: start:php${tag2}
+
+  stop:php${tag1}:
+    desc: Stop the PHP ${tag1} stack
+    cmds:
+      - ./bin/env-run .env.php${tag1} docker compose down --remove-orphans
+
+  stop:php${tag2}:
+    desc: Stop the PHP ${tag2} stack
+    cmds:
+      - ./bin/env-run .env.php${tag2} docker compose down --remove-orphans
+
+  stop:all:
+    desc: Stop both PHP stacks
+    cmds:
+      - task: stop:php${tag1}
+      - task: stop:php${tag2}
+
+  install:php${tag1}:
+    desc: Install WordPress on the PHP ${tag1} stack
+    cmds:
+      - ./bin/env-run .env.php${tag1} sh -c 'exec ./bin/wp core install --url="http://localhost:\$WP_PORT" --title="\$WP_TITLE" --admin_user="\$WP_ADMIN_USER" --admin_password="\$WP_ADMIN_PASSWORD" --admin_email="\$WP_ADMIN_EMAIL" --skip-email'
+
+  install:php${tag2}:
+    desc: Install WordPress on the PHP ${tag2} stack
+    cmds:
+      - ./bin/env-run .env.php${tag2} sh -c 'exec ./bin/wp core install --url="http://localhost:\$WP_PORT" --title="\$WP_TITLE" --admin_user="\$WP_ADMIN_USER" --admin_password="\$WP_ADMIN_PASSWORD" --admin_email="\$WP_ADMIN_EMAIL" --skip-email'
+
+  wp:php${tag1}:
+    desc: Run wp-cli on the PHP ${tag1} stack - "task wp:php${tag1} -- plugin list"
+    cmds:
+      - ./bin/env-run .env.php${tag1} ./bin/wp {{.CLI_ARGS}}
+
+  wp:php${tag2}:
+    desc: Run wp-cli on the PHP ${tag2} stack - "task wp:php${tag2} -- plugin list"
+    cmds:
+      - ./bin/env-run .env.php${tag2} ./bin/wp {{.CLI_ARGS}}
+
+  shell:php${tag1}:
+    desc: Shell into the PHP ${tag1} WordPress container
+    cmds:
+      - ./bin/env-run .env.php${tag1} docker compose exec wordpress bash
+
+  shell:php${tag2}:
+    desc: Shell into the PHP ${tag2} WordPress container
+    cmds:
+      - ./bin/env-run .env.php${tag2} docker compose exec wordpress bash
+
+  logs:php${tag1}:
+    desc: Follow the PHP ${tag1} stack logs
+    cmds:
+      - ./bin/env-run .env.php${tag1} docker compose logs -f --tail=100
+
+  logs:php${tag2}:
+    desc: Follow the PHP ${tag2} stack logs
+    cmds:
+      - ./bin/env-run .env.php${tag2} docker compose logs -f --tail=100
+
+  debug:compare:
+    desc: Crawl both PHP stacks and compare PHP/JS errors
+    cmds:
+      - ./bin/debug-compare {{.CLI_ARGS}}
+
+  debug:logs:
+    desc: Tail both per-version WordPress debug logs
+    cmds:
+      - tail -f wp-content/debug.log.php${tag1} wp-content/debug.log.php${tag2}
+EOF
+}
+
+setup_gitignore() {
+  local gi="$ROOT/.gitignore"
+  [ -f "$gi" ] || return 0
+  grep -q '^\.env\.php\*$' "$gi" || printf '.env.php*\n' >> "$gi"
+}
+
+# --- entry point ------------------------------------------------------------
+if [ -n "$MULTI_PHP" ]; then
+  run_multi_php
+else
+  single_stack_init
 fi
-
-ok ".env written to $ENV_FILE"
-printf '\n'
-printf '  project      %s\n' "$project_name"
-printf '  php          %s (%s)\n' "$php_version" "$(php_source_label "$php_source")"
-printf '  wordpress    http://localhost:%s\n' "$wp_port"
-printf '  phpmyadmin   http://localhost:%s\n' "$pma_port"
-printf '  vite         http://localhost:%s\n' "$vite_port"
-printf '  admin        %s (password in .env)\n' "$admin_user"
-printf '\n'
-info "next: task start   (or: docker compose up -d --build)"

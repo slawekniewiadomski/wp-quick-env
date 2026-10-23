@@ -1,5 +1,6 @@
 # local configuration
 .env
+.env.php*
 
 # generated / runtime content
 db/*.sql
@@ -10,6 +11,7 @@ wp-content/cache/
 wp-content/upgrade/
 wp-content/languages/
 wp-content/*.log
+wp-content/debug.log*
 
 # project state: themes and plugins are cloned/dropped in per project
 wp-content/plugins/*
