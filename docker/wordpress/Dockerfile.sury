@@ -1,0 +1,111 @@
+# syntax=docker/dockerfile:1
+#
+# PHP below 8.3 no longer has an official WordPress image, and the upstream
+# branches are EOL. This image builds the runtime from Debian + packages.sury.org
+# (Ondrej Sury), which keeps rebuilding those branches with security fixes.
+# WordPress core and its entrypoint are copied from the official image so the
+# behaviour (wp-config generation, seeding wp-content) stays identical.
+
+ARG WP_VERSION=7.1
+ARG PHP_SUITE=bookworm
+ARG COMPOSER_VERSION=2
+
+# Composer binary, copied out of the official image below.
+FROM composer:${COMPOSER_VERSION} AS composer-bin
+
+# WordPress core + docker-entrypoint.sh, independent of the PHP runtime.
+FROM wordpress:${WP_VERSION} AS wp-src
+
+FROM debian:${PHP_SUITE}
+
+ARG PHP_VERSION=8.2
+ARG PHP_SUITE
+ARG WP_CLI_VERSION=2.12.0
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- patched PHP + Apache ----------------------------------------------------
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    install -d -m 0755 /usr/share/keyrings; \
+    curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg; \
+    printf 'deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ %s main\n' \
+      "${PHP_SUITE}" > /etc/apt/sources.list.d/sury-php.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      apache2 \
+      "libapache2-mod-php${PHP_VERSION}" \
+      "php${PHP_VERSION}-bcmath" \
+      "php${PHP_VERSION}-cli" \
+      "php${PHP_VERSION}-curl" \
+      "php${PHP_VERSION}-gd" \
+      "php${PHP_VERSION}-intl" \
+      "php${PHP_VERSION}-mbstring" \
+      "php${PHP_VERSION}-mysql" \
+      "php${PHP_VERSION}-opcache" \
+      "php${PHP_VERSION}-xml" \
+      "php${PHP_VERSION}-zip" \
+      default-mysql-client git less passwd unzip zip; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- wp-cli -----------------------------------------------------------------
+# Pinned phar with checksum verification, so `wp` lives in the same container
+# as WordPress and reuses the generated wp-config.php.
+RUN set -eux; \
+    curl -fsSL -o /tmp/wp-cli.phar \
+      "https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar"; \
+    curl -fsSL -o /tmp/wp-cli.phar.sha512 \
+      "https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar.sha512"; \
+    expected="$(awk '{print $1}' /tmp/wp-cli.phar.sha512)"; \
+    printf '%s  %s\n' "$expected" /tmp/wp-cli.phar | sha512sum -c -; \
+    install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp; \
+    rm -rf /tmp/wp-cli.phar /tmp/wp-cli.phar.sha512
+
+COPY --from=composer-bin /usr/bin/composer /usr/local/bin/composer
+
+# --- Apache -----------------------------------------------------------------
+# Debian's default vhost already points at /var/www/html; enable the bits
+# WordPress needs and run Apache as PID 1 (the envvars file supplies the
+# APACHE_RUN_* settings that apache2 itself does not read).
+RUN set -eux; \
+    a2enmod rewrite headers expires "php${PHP_VERSION}"; \
+    sed -ri 's/^([[:space:]]*)AllowOverride[[:space:]]+None/\1AllowOverride All/' /etc/apache2/apache2.conf; \
+    sed -ri 's/^([[:space:]]*)Options Indexes FollowSymLinks/\1Options FollowSymLinks/' /etc/apache2/apache2.conf; \
+    printf 'ServerName localhost\n' > /etc/apache2/conf-available/servername.conf; \
+    printf 'DirectoryIndex index.php index.html\n' > /etc/apache2/conf-available/wordpress.conf; \
+    a2enconf servername wordpress; \
+    rm -f /var/www/html/index.html; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      '. /etc/apache2/envvars' \
+      'exec apache2 -DFOREGROUND "$@"' \
+      > /usr/local/bin/apache2-foreground; \
+    chmod 0755 /usr/local/bin/apache2-foreground
+
+# --- host user mapping ------------------------------------------------------
+# Remap www-data to the host user so bind-mounted wp-content stays yours.
+RUN set -eux; \
+    if getent group "${HOST_GID}" >/dev/null 2>&1; then \
+      groupmod -o -g "${HOST_GID}" www-data; \
+    else \
+      groupmod -g "${HOST_GID}" www-data; \
+    fi; \
+    if getent passwd "${HOST_UID}" >/dev/null 2>&1; then \
+      usermod -o -u "${HOST_UID}" www-data; \
+    else \
+      usermod -u "${HOST_UID}" www-data; \
+    fi
+
+# --- WordPress core ---------------------------------------------------------
+COPY --from=wp-src /usr/src/wordpress /usr/src/wordpress
+COPY --from=wp-src /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+WORKDIR /var/www/html
+ENV WP_CLI_CACHE_DIR=/tmp/wp-cli-cache
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["apache2-foreground"]
