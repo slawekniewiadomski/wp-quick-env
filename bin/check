@@ -2,13 +2,18 @@
 # Validate the version matrix (image tags, PHP source) and port availability
 # before starting the stack, so failures are one readable line instead of a raw
 # pull or bind error.
+#
+# ENV_FILE=.env.php74 validates the multi-php stack instead of the default .env.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
+export ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 require_env
+
+compose=(docker compose --env-file "$ENV_FILE")
 
 WP_VERSION="$(env_get WP_VERSION)"
 PHP_VERSION="$(env_get PHP_VERSION)"
@@ -27,7 +32,7 @@ if [ -z "$expected_source" ]; then
 fi
 if [ -z "$php_source" ]; then
   if [ "$expected_source" = "sury" ]; then
-    die "PHP_SOURCE is missing in .env - add PHP_SOURCE=sury (or run ./bin/init --force)"
+    die "PHP_SOURCE is missing in $ENV_FILE - add PHP_SOURCE=sury (or run ./bin/init --force)"
   fi
   php_source="$expected_source"
 fi
@@ -74,7 +79,7 @@ check_sury_branch() {
   fi
 }
 
-info "version matrix (.env)"
+info "version matrix ($ENV_FILE)"
 printf '\033[32m✓\033[0m %-12s php%s (%s)\n' "php source" "$PHP_VERSION" "$(php_source_label "$php_source")"
 
 if [ "$php_source" = "sury" ]; then
@@ -104,9 +109,9 @@ if version_lt "$PHP_VERSION" "$min_php"; then
 fi
 
 printf '\n'
-info "ports (.env)"
+info "ports ($ENV_FILE)"
 
-if project_running; then
+if "${compose[@]}" ps -q 2>/dev/null | grep -q .; then
   printf '\033[33m!\033[0m stack is running - port checks skipped\n'
 else
   for spec in "WP_PORT:$WP_PORT" "PMA_PORT:$PMA_PORT" "VITE_PORT:$VITE_PORT"; do
@@ -115,7 +120,7 @@ else
     if port_busy "$port"; then
       owner="$(port_owner "$port")"
       printf '\033[31m✗\033[0m %-10s %-6s in use%s\n' "$key" "$port" "${owner:+ by $owner}"
-      printf '    %s\n' "Run 'task ports:new' or edit $key in .env"
+      printf '    %s\n' "Run 'task ports:new' or edit $key in $ENV_FILE"
       failures=$((failures + 1))
     else
       printf '\033[32m✓\033[0m %-10s %-6s free\n' "$key" "$port"

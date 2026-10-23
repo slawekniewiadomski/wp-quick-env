@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Print the resolved version matrix and image names.
+#
+# ENV_FILE=.env.php74 prints the multi-php stack instead of the default .env.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
 
+export ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 require_env
 
 project="$(env_get COMPOSE_PROJECT_NAME)"
@@ -18,7 +21,7 @@ if [ -z "$expected_source" ]; then
 fi
 if [ -z "$php_source" ]; then
   if [ "$expected_source" = "sury" ]; then
-    die "PHP_SOURCE is missing in .env - add PHP_SOURCE=sury (or run ./bin/init --force)"
+    die "PHP_SOURCE is missing in $ENV_FILE - add PHP_SOURCE=sury (or run ./bin/init --force)"
   fi
   php_source="$expected_source"
 fi
@@ -26,6 +29,7 @@ if [ "$php_source" != "$expected_source" ]; then
   die "PHP_SOURCE=$php_source does not match PHP $php_version (expected $expected_source)"
 fi
 
+printf '%-20s %s\n' "env file" "$ENV_FILE"
 printf '%-20s %s\n' "project" "$project"
 if [ "$php_source" = "sury" ]; then
   printf '%-20s %s\n' "wordpress source" "wordpress:${wp_version} (copied into the image)"
@@ -45,3 +49,4 @@ printf '%-20s %s\n' "WP_PORT" "$(env_get WP_PORT)"
 printf '%-20s %s\n' "PMA_PORT" "$(env_get PMA_PORT)"
 printf '%-20s %s\n' "VITE_PORT" "$(env_get VITE_PORT)"
 printf '%-20s %s\n' "THEME_DIR" "$(env_get THEME_DIR || true)"
+printf '%-20s %s\n' "WP_DEBUG_LOG_FILE" "$(env_get WP_DEBUG_LOG_FILE || true)"

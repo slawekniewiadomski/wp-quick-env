@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Show the configured ports, or roll a fresh free block into .env with --new.
+# Show the configured ports, or roll a fresh free block into the env file.
+#
+# ENV_FILE=.env.php74 operates on the multi-php stack instead of the default .env.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
+
+export ENV_FILE="${ENV_FILE:-$ROOT/.env}"
 
 NEW=0
 BASE=""
@@ -19,7 +23,7 @@ while [ $# -gt 0 ]; do
 Usage: bin/ports [--new] [--base PORT]
 
   (no flags)   show WP_PORT / PMA_PORT / VITE_PORT and whether they are free
-  --new        allocate a new random free block and write it to .env
+  --new        allocate a new random free block and write it to the env file
   --base PORT  use a specific block base with --new
 EOF
       exit 0
@@ -29,6 +33,7 @@ EOF
 done
 
 require_env
+compose=(docker compose --env-file "$ENV_FILE")
 
 if [ "$NEW" -eq 1 ]; then
   old_wp="$(env_get WP_PORT)"
@@ -53,7 +58,7 @@ if [ "$NEW" -eq 1 ]; then
   exit 0
 fi
 
-if project_running; then
+if "${compose[@]}" ps -q 2>/dev/null | grep -q .; then
   printf '\033[33m!\033[0m stack is running - busy ports are expected\n\n'
 fi
 

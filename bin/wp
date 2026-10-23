@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # wp-cli inside the WordPress container, running as the remapped www-data user
 # so generated files stay host-owned.
+#
+# ENV_FILE=.env.php74 selects the multi-php stack; the compose project name and
+# URLs come from that file.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,9 +11,12 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$ROOT"
 
-if [ -z "$(docker compose ps -q wordpress 2>/dev/null)" ]; then
+ENV_FILE="${ENV_FILE:-.env}"
+compose=(docker compose --env-file "$ENV_FILE")
+
+if [ -z "$("${compose[@]}" ps -q wordpress 2>/dev/null)" ]; then
   printf '\033[31m✗\033[0m WordPress container is not running - start it with: task start\n' >&2
   exit 1
 fi
 
-exec docker compose exec -T -u www-data wordpress wp "$@"
+exec "${compose[@]}" exec -T -u www-data wordpress wp "$@"
