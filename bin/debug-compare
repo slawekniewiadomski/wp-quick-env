@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""
+Crawl two WordPress stacks (same theme, different PHP versions) and compare
+errors, so you can see what breaks when upgrading PHP.
+
+For every URL on both stacks it records:
+  - HTTP status
+  - new PHP errors/warnings from that stack's debug.log
+  - browser console errors (JavaScript)
+
+Requirements: pip install playwright && playwright install chromium
+
+Usage:
+  ./bin/debug-compare                     # auto-detect two .env.php* files
+  ./bin/debug-compare --env1 .env.php74 --env2 .env.php80
+  ./bin/debug-compare --urls /,/about/,/blog/
+  ./bin/debug-compare --no-headless       # watch the browser
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    sys.stderr.write(
+        "Error: playwright is not installed.\n"
+        "  pip install playwright && playwright install chromium\n"
+    )
+    sys.exit(2)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+PHP_ERROR_RE = re.compile(
+    r"PHP (Fatal error|Parse error|Warning|Notice|Deprecated|Error):\s*(.+)"
+)
+
+# Console noise that is never a PHP-upgrade regression.
+CONSOLE_IGNORE = re.compile(r"favicon\.ico|net::ERR_ABORTED", re.I)
+
+
+def load_env(path):
+    """Parse a KEY=VALUE env file literally (no shell expansion)."""
+    env = {}
+    p = Path(path)
+    if not p.is_file():
+        return env
+    for raw in p.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        env[key] = val
+    return env
+
+
+def auto_detect_envs():
+    """Return the two .env.phpXX files, oldest version first."""
+    found = sorted(ROOT.glob(".env.php*"))
+    if len(found) < 2:
+        return None, None
+
+    def version_key(p):
+        digits = p.name.replace(".env.php", "")
+        try:
+            return tuple(int(digits[i : i + 1]) for i in range(0, len(digits)))
+        except ValueError:
+            return (999,)
+
+    found.sort(key=version_key)
+    return str(found[0].relative_to(ROOT)), str(found[-1].relative_to(ROOT))
+
+
+def base_url(env):
+    return f"http://localhost:{env.get('WP_PORT', '8080')}"
+
+
+def debug_log_path(env):
+    rel = env.get("WP_DEBUG_LOG_FILE", "wp-content/debug.log")
+    return ROOT / rel
+
+
+def wp_env(env, env_file):
+    e = os.environ.copy()
+    e.update(env)
+    e["ENV_FILE"] = env_file
+    return e
+
+
+async def wp_json(args, env, env_file):
+    """Run ./bin/wp with JSON output and return parsed data."""
+    proc = await asyncio.create_subprocess_exec(
+        str(ROOT / "bin" / "wp"),
+        *args,
+        cwd=str(ROOT),
+        env=wp_env(env, env_file),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(err.decode(errors="replace").strip() or "wp failed")
+    return json.loads(out.decode() or "[]")
+
+
+async def discover_urls(env, env_file):
+    """Discover public URLs via wp-cli."""
+    urls = {"/"}
+    try:
+        for post in await wp_json(
+            ["post", "list", "--post_type=post,page", "--format=json",
+             "--fields=post_name,post_type"],
+            env, env_file,
+        ):
+            name = post.get("post_name")
+            if name:
+                urls.add(f"/{name}/")
+
+        for taxonomy, prefix in (("category", "/category/"), ("post_tag", "/tag/")):
+            for term in await wp_json(
+                ["term", "list", taxonomy, "--format=json", "--fields=slug"],
+                env, env_file,
+            ):
+                slug = term.get("slug")
+                if slug:
+                    urls.add(f"{prefix}{slug}/")
+
+        for user in await wp_json(
+            ["user", "list", "--role=author", "--format=json",
+             "--fields=user_nicename"],
+            env, env_file,
+        ):
+            nicename = user.get("user_nicename")
+            if nicename:
+                urls.add(f"/author/{nicename}/")
+    except Exception as exc:  # noqa: BLE001 - discovery is best effort
+        sys.stderr.write(f"{YELLOW}! URL discovery incomplete: {exc}{RESET}\n")
+
+    urls.update({"/blog/", "/search/", "/feed/"})
+    return sorted(urls)
+
+
+def read_new_php_errors(log_path):
+    """Return PHP errors currently in the log, then clear it."""
+    if not log_path.exists():
+        return []
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return []
+    finally:
+        try:
+            log_path.write_text("")
+        except OSError:
+            pass
+    errors = []
+    for line in text.splitlines():
+        m = PHP_ERROR_RE.search(line)
+        if m:
+            errors.append(f"{m.group(1)}: {m.group(2).strip()}")
+    return errors
+
+
+async def crawl_stack(label, url_base, urls, log_path, headless):
+    results = {}
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=headless)
+        context = await browser.new_context(ignore_https_errors=True)
+        page = await context.new_page()
+
+        # One console listener for the whole run; reset the buffer per URL.
+        console_errors = []
+        page.on("console",
+                lambda msg: console_errors.append(msg.text)
+                if msg.type == "error" else None)
+
+        print(f"\n{CYAN}{BOLD}{label}{RESET} {url_base}  ({len(urls)} URLs)")
+        for i, path in enumerate(urls, 1):
+            console_errors.clear()
+
+            # Start from a clean log so we only see this page's errors.
+            if log_path.exists():
+                try:
+                    log_path.write_text("")
+                except OSError:
+                    pass
+
+            status = 0
+            started = time.time()
+            try:
+                resp = await page.goto(url_base + path, wait_until="load",
+                                       timeout=20000)
+                status = resp.status if resp else 0
+            except Exception as exc:  # noqa: BLE001
+                console_errors.append(f"navigation: {exc}")
+            elapsed = time.time() - started
+
+            php_errors = read_new_php_errors(log_path)
+            js_errors = [e for e in console_errors if not CONSOLE_IGNORE.search(e)]
+
+            results[path] = {
+                "status": status,
+                "php_errors": php_errors,
+                "js_errors": js_errors,
+            }
+
+            flags = []
+            if status != 200:
+                flags.append(f"{RED}{status or 'ERR'}{RESET}")
+            if php_errors:
+                flags.append(f"{RED}{len(php_errors)} PHP{RESET}")
+            if js_errors:
+                flags.append(f"{YELLOW}{len(js_errors)} JS{RESET}")
+            tail = ("  " + " ".join(flags)) if flags else ""
+            print(f"  [{i}/{len(urls)}] {elapsed:5.2f}s  {path}{tail}")
+
+        await browser.close()
+    return results
+
+
+def compare(r1, r2):
+    """Return regressions introduced by the second stack."""
+    regressions = []
+    only1, only2 = set(r1) - set(r2), set(r2) - set(r1)
+
+    for path in sorted(set(r1) & set(r2)):
+        a, b = r1[path], r2[path]
+        added_php = [e for e in b["php_errors"] if e not in a["php_errors"]]
+        added_js = [e for e in b["js_errors"] if e not in a["js_errors"]]
+        status_changed = a["status"] != b["status"]
+        if added_php or added_js or status_changed:
+            regressions.append({
+                "path": path,
+                "status": (a["status"], b["status"]) if status_changed else None,
+                "php": added_php,
+                "js": added_js,
+            })
+
+    return regressions, only1, only2
+
+
+def report(regressions, only1, only2, label1, label2):
+    print(f"\n{BOLD}=== {label1}  vs  {label2} ==={RESET}")
+    if only1:
+        print(f"{YELLOW}Only on {label1}:{RESET} {', '.join(sorted(only1))}")
+    if only2:
+        print(f"{YELLOW}Only on {label2}:{RESET} {', '.join(sorted(only2))}")
+
+    if not regressions:
+        print(f"{GREEN}✓ No regressions on {label2}.{RESET}")
+        return False
+
+    print(f"{RED}✗ {len(regressions)} URL(s) regressed on {label2}:{RESET}")
+    for r in regressions:
+        print(f"\n  {BOLD}{r['path']}{RESET}")
+        if r["status"]:
+            print(f"    status: {r['status'][0]} -> {r['status'][1]}")
+        for e in r["php"]:
+            print(f"    {RED}PHP{RESET}  {e}")
+        for e in r["js"]:
+            print(f"    {YELLOW}JS {RESET}  {e}")
+    return True
+
+
+async def main():
+    p = argparse.ArgumentParser(
+        description="Crawl two WordPress PHP stacks and compare errors.")
+    p.add_argument("--env1", help="first stack env file (default: oldest .env.php*)")
+    p.add_argument("--env2", help="second stack env file (default: newest .env.php*)")
+    p.add_argument("--urls", help="comma-separated paths (skips discovery)")
+    p.add_argument("--no-headless", dest="headless", action="store_false",
+                   help="show the browser")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(headless=True)
+    args = p.parse_args()
+
+    env1_file, env2_file = args.env1, args.env2
+    if not env1_file or not env2_file:
+        a, b = auto_detect_envs()
+        env1_file = env1_file or a
+        env2_file = env2_file or b
+    if not env1_file or not env2_file:
+        sys.stderr.write(
+            f"{RED}Need two .env.php* files. Run: task init --multi-php 7.4,8.0{RESET}\n")
+        return 2
+
+    env1 = load_env(ROOT / env1_file)
+    env2 = load_env(ROOT / env2_file)
+    if not env1 or not env2:
+        sys.stderr.write(f"{RED}Could not read {env1_file} / {env2_file}{RESET}\n")
+        return 2
+
+    label1 = f"PHP {env1.get('PHP_VERSION', '?')}"
+    label2 = f"PHP {env2.get('PHP_VERSION', '?')}"
+    url1, url2 = base_url(env1), base_url(env2)
+
+    if args.urls:
+        urls = [u.strip() for u in args.urls.split(",") if u.strip()]
+    else:
+        print(f"{CYAN}Discovering URLs from {label1}...{RESET}")
+        urls = await discover_urls(env1, env1_file)
+        print(f"  found {len(urls)} URLs")
+
+    log1, log2 = debug_log_path(env1), debug_log_path(env2)
+    for log in (log1, log2):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch(exist_ok=True)
+
+    r1 = await crawl_stack(label1, url1, urls, log1, args.headless)
+    r2 = await crawl_stack(label2, url2, urls, log2, args.headless)
+
+    regressions, only1, only2 = compare(r1, r2)
+    if args.json:
+        print(json.dumps(regressions, indent=2))
+    has_regressions = report(regressions, only1, only2, label1, label2)
+    return 1 if has_regressions else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
