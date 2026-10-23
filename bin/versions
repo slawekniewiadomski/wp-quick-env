@@ -11,16 +11,35 @@ require_env
 project="$(env_get COMPOSE_PROJECT_NAME)"
 wp_version="$(env_get WP_VERSION)"
 php_version="$(env_get PHP_VERSION)"
+php_source="$(env_get PHP_SOURCE || true)"
+expected_source="$(php_source_for "$php_version" || true)"
+if [ -z "$expected_source" ]; then
+  die "PHP $php_version has no patched build - use one of: $PHP_BRANCHES"
+fi
+if [ -z "$php_source" ]; then
+  if [ "$expected_source" = "sury" ]; then
+    die "PHP_SOURCE is missing in .env - add PHP_SOURCE=sury (or run ./bin/init --force)"
+  fi
+  php_source="$expected_source"
+fi
+if [ "$php_source" != "$expected_source" ]; then
+  die "PHP_SOURCE=$php_source does not match PHP $php_version (expected $expected_source)"
+fi
 
 printf '%-20s %s\n' "project" "$project"
-printf '%-20s %s\n' "wordpress image" "wordpress:${wp_version}-php${php_version}-apache"
+if [ "$php_source" = "sury" ]; then
+  printf '%-20s %s\n' "wordpress source" "wordpress:${wp_version} (copied into the image)"
+else
+  printf '%-20s %s\n' "wordpress source" "wordpress:${wp_version}-php${php_version}-apache"
+fi
 printf '%-20s %s\n' "php (runtime)" "$php_version"
+printf '%-20s %s\n' "php source" "$(php_source_label "$php_source")"
 printf '%-20s %s\n' "wp-cli" "$(env_get WP_CLI_VERSION)"
 printf '%-20s %s\n' "composer" "$(env_get COMPOSER_VERSION) (runs on php ${php_version})"
 printf '%-20s %s\n' "node" "$(env_get NODE_VERSION)"
 printf '%-20s %s\n' "mariadb" "$(env_get MARIADB_VERSION)"
 printf '%-20s %s\n' "phpmyadmin" "$(env_get PHPMYADMIN_VERSION)"
-printf '%-20s %s\n' "built image" "${project}/php:wp${wp_version}-php${php_version}"
+printf '%-20s %s\n' "built image" "${project}/php:wp${wp_version}-php${php_version}-${php_source}"
 printf '\n'
 printf '%-20s %s\n' "WP_PORT" "$(env_get WP_PORT)"
 printf '%-20s %s\n' "PMA_PORT" "$(env_get PMA_PORT)"
